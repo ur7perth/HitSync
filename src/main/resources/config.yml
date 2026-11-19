@@ -1,0 +1,30 @@
+prefix: "&eHitSync"
+
+alert-format: "{prefix} &7» &c{attacker} &7ghost hit &f{target} &8[{status}&8] &7ping &f{ping}ms &7reach &f{reach}"
+
+# Every feature can be switched on/off with /hitsync toggle <feature>
+features:
+  detector: true
+  alerts: true
+  auto-fix: true
+  wall-protection: true
+
+detector:
+  reach: 3.1
+  aim-leniency: 0.10
+  combo-leniency-bonus: 0.15
+  check-delay-ticks: 2
+  treat-invulnerability-as-ghost: false
+  alert-cooldown-ms: 1000
+
+auto-fix:
+  max-reach: 3.4
+  max-fixes-per-second: 10
+
+combo:
+  window-ticks: 30
+
+wall-protection:
+  inside-blocks: true
+  pinned-against-wall: true
+  min-combo-hits: 1
