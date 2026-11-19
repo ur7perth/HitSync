@@ -3,17 +3,21 @@ enabled: true
 # Max hit distance used to verify a hit (vanilla survival reach is 3.0)
 reach: 3.0
 
+# Extra distance allowed for fast moving targets (elytra, knockback)
+reach-slack: 0.8
+
 # Hitbox tolerance used when verifying that a player is under the crosshair
 ray-tolerance: 0.05
+
+# Use the attacker's ping to check where the target was when the hit was sent
+ping-compensation: true
 
 # Ticks to wait before deciding that the server did not register a hit
 check-delay-ticks: 2
 
-# Critical hit synchronization (removes fake crits, adds missing real crits)
 crit-sync:
   java: true
   bedrock: true
 
 bedrock:
-  # Fallback detection if Floodgate is not installed
   name-prefix: "."
