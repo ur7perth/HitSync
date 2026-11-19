@@ -27,4 +27,7 @@ combo:
 wall-protection:
   inside-blocks: true
   pinned-against-wall: true
-  min-combo-hits: 1
+  # false = protects every hit, true = only protects follow-up combo hits
+  require-combo: false
+  # how close to a wall counts as "pinned"
+  pin-distance: 0.5
