@@ -11,10 +11,12 @@ public final class NerithMcHitSync extends JavaPlugin {
     @Override
     public void onEnable() {
         saveDefaultConfig();
+        getConfig().options().copyDefaults(true);
+        saveConfig();
 
         tracker = new HitTracker(this);
-        getServer().getPluginManager().registerEvents(tracker, this);
-        getServer().getPluginManager().registerEvents(new WallGuard(this, tracker), this);
+        getServer().getPluginManager()
+                .registerEvents(tracker, this);
 
         HitSyncCommand command = new HitSyncCommand(this);
         PluginCommand pc = getCommand("hitsync");
@@ -22,8 +24,7 @@ public final class NerithMcHitSync extends JavaPlugin {
             pc.setExecutor(command);
             pc.setTabCompleter(command);
         }
-
-        getLogger().info("NerithMcHitSync v" + getDescription().getVersion() + " enabled.");
+        getLogger().info("NerithMcHitSync enabled.");
     }
 
     @Override
