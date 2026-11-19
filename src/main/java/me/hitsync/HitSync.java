@@ -12,7 +12,6 @@ import org.bukkit.GameMode;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Entity;
-import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -69,8 +68,10 @@ public final class HitSync extends JavaPlugin implements Listener {
                             }
 
                             Player attacker = event.getPlayer();
+
                             int targetId = event.getPacket()
-                                    .getIntegers().read(0);
+                                    .getIntegers()
+                                    .read(0);
 
                             Bukkit.getScheduler().runTask(
                                     HitSync.this,
@@ -91,9 +92,11 @@ public final class HitSync extends JavaPlugin implements Listener {
                 this,
                 () -> {
                     tick++;
+
                     registeredHits.entrySet().removeIf(
                             e -> tick - e.getValue() > 5
                     );
+
                     lastRepairs.entrySet().removeIf(
                             e -> tick - e.getValue() > 5
                     );
@@ -107,6 +110,7 @@ public final class HitSync extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
+
         ProtocolLibrary.getProtocolManager()
                 .removePacketListeners(this);
 
@@ -117,10 +121,6 @@ public final class HitSync extends JavaPlugin implements Listener {
         return attacker + ":" + target;
     }
 
-    /*
-     * Detect damage already processed by the server.
-     * Cancelled damage events are also recorded.
-     */
     @EventHandler(priority = EventPriority.MONITOR)
     public void onEntityDamage(EntityDamageByEntityEvent event) {
 
@@ -128,7 +128,10 @@ public final class HitSync extends JavaPlugin implements Listener {
         if (!(event.getEntity() instanceof Player target)) return;
 
         registeredHits.put(
-                hitKey(attacker.getUniqueId(), target.getUniqueId()),
+                hitKey(
+                        attacker.getUniqueId(),
+                        target.getUniqueId()
+                ),
                 tick
         );
     }
@@ -169,27 +172,25 @@ public final class HitSync extends JavaPlugin implements Listener {
 
         Long normalHit = registeredHits.get(key);
 
-        // A normal or cancelled server damage event already occurred.
-        if (normalHit != null && tick - normalHit <= 2) return;
-
-        // Do not repair attacks during vanilla invulnerability frames.
-        if (target.getNoDamageTicks() > 0 || target.isInvulnerable()) {
+        if (normalHit != null && tick - normalHit <= 2) {
             return;
         }
 
-        // Preserve the vanilla attack cooldown.
-        float cooldown = attacker.getAttackCooldown(0.5f);
+        if (target.getNoDamageTicks() > 0
+                || target.isInvulnerable()) {
+            return;
+        }
+
+        float cooldown = attacker.getAttackCooldown();
 
         if (cooldown < 0.95f) return;
 
-        // Basic vanilla melee reach validation.
         if (attacker.getEyeLocation().distanceSquared(
                 target.getLocation().add(0, 0.9, 0)
         ) > 9.0) {
             return;
         }
 
-        // The target must actually be in the attacker's line of sight.
         Vector direction = attacker.getEyeLocation().getDirection();
 
         RayTraceResult ray = attacker.getWorld().rayTraceEntities(
@@ -202,10 +203,11 @@ public final class HitSync extends JavaPlugin implements Listener {
 
         if (ray == null || ray.getHitEntity() == null) return;
 
-        // Prevent repeated repairs for the same attacker/target.
         Long lastRepair = lastRepairs.get(key);
 
-        if (lastRepair != null && tick - lastRepair < 2) return;
+        if (lastRepair != null && tick - lastRepair < 2) {
+            return;
+        }
 
         double damage = calculateDamage(attacker, cooldown);
 
@@ -213,10 +215,6 @@ public final class HitSync extends JavaPlugin implements Listener {
 
         lastRepairs.put(key, tick);
 
-        /*
-         * Uses Bukkit's normal damage pipeline.
-         * Other plugins, including WorldGuard, can cancel this event.
-         */
         target.damage(damage, attacker);
 
         getLogger().fine(
@@ -228,7 +226,8 @@ public final class HitSync extends JavaPlugin implements Listener {
 
     private double calculateDamage(Player attacker, float cooldown) {
 
-        if (attacker.getAttribute(Attribute.GENERIC_ATTACK_DAMAGE) == null) {
+        if (attacker.getAttribute(
+                Attribute.GENERIC_ATTACK_DAMAGE) == null) {
             return 0;
         }
 
@@ -236,13 +235,12 @@ public final class HitSync extends JavaPlugin implements Listener {
                 Attribute.GENERIC_ATTACK_DAMAGE
         ).getValue();
 
-        // Vanilla-style attack cooldown scaling.
         double strength = 0.2 + cooldown * cooldown * 0.8;
 
         double damage = baseDamage * strength;
 
-        // Include the held weapon's Sharpness bonus.
-        if (attacker.getInventory().getItemInMainHand().hasItemMeta()) {
+        if (attacker.getInventory()
+                .getItemInMainHand().hasItemMeta()) {
 
             int sharpness = attacker.getInventory()
                     .getItemInMainHand()
@@ -254,14 +252,6 @@ public final class HitSync extends JavaPlugin implements Listener {
         }
 
         return Math.max(0, damage);
-    }
-
-    public boolean isEnabled() {
-        return enabled;
-    }
-
-    public void setEnabled(boolean enabled) {
-        this.enabled = enabled;
     }
 
     @Override
@@ -297,6 +287,7 @@ public final class HitSync extends JavaPlugin implements Listener {
             sender.sendMessage("§cHitSync has been disabled!");
 
         } else {
+
             sender.sendMessage("§cUsage: /GhostHit <On|Off>");
         }
 
