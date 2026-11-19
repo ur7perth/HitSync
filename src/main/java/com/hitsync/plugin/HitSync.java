@@ -23,7 +23,6 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabExecutor;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Player;
-import org.bukkit.event.Event;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -41,6 +40,7 @@ import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 
 import java.lang.reflect.Method;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -52,17 +52,22 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
     // ---------------------------------------------------------------- settings
     private volatile boolean enabled;
     private double reach;
+    private double reachSlack;
     private double rayTolerance;
+    private boolean pingComp;
     private int checkDelay;
     private boolean syncJava;
     private boolean syncBedrock;
     private String bedrockPrefix;
+
+    private static final int HISTORY_TICKS = 20;
 
     // ---------------------------------------------------------------- state (main thread only)
     private final Map<UUID, Integer> lastAttempt = new HashMap<>();
     private final Map<UUID, Integer> lastUse = new HashMap<>();
     private final Map<UUID, FallData> falls = new HashMap<>();
     private final Map<UUID, Pending> pending = new HashMap<>();
+    private final Map<UUID, ArrayDeque<Snap>> history = new HashMap<>();
 
     private boolean applying;
     private boolean applyFired;
@@ -75,6 +80,12 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
         double lastY;
         double fall;
         FallData(double y) { this.lastY = y; }
+    }
+
+    private static final class Snap {
+        final int tick;
+        final BoundingBox box;
+        Snap(int tick, BoundingBox box) { this.tick = tick; this.box = box; }
     }
 
     private static final class Pending {
@@ -111,6 +122,7 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
 
         registerPackets();
         Bukkit.getScheduler().runTask(this, this::setupFloodgate);
+        Bukkit.getScheduler().runTaskTimer(this, this::recordHistory, 1L, 1L);
         getLogger().info("HitSync enabled. State: " + (enabled ? "ON" : "OFF"));
     }
 
@@ -125,7 +137,9 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
         reloadConfig();
         enabled = getConfig().getBoolean("enabled", true);
         reach = getConfig().getDouble("reach", 3.0);
+        reachSlack = getConfig().getDouble("reach-slack", 0.8);
         rayTolerance = getConfig().getDouble("ray-tolerance", 0.05);
+        pingComp = getConfig().getBoolean("ping-compensation", true);
         checkDelay = Math.max(1, getConfig().getInt("check-delay-ticks", 2));
         syncJava = getConfig().getBoolean("crit-sync.java", true);
         syncBedrock = getConfig().getBoolean("crit-sync.bedrock", true);
@@ -152,6 +166,35 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
             } catch (Throwable ignored) { }
         }
         return bedrockPrefix != null && !bedrockPrefix.isEmpty() && p.getName().startsWith(bedrockPrefix);
+    }
+
+    // ---------------------------------------------------------------- position history
+    private void recordHistory() {
+        int now = Bukkit.getCurrentTick();
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            ArrayDeque<Snap> q = history.computeIfAbsent(p.getUniqueId(), k -> new ArrayDeque<>());
+            q.addLast(new Snap(now, p.getBoundingBox().clone()));
+            while (!q.isEmpty() && q.peekFirst().tick < now - HISTORY_TICKS) q.pollFirst();
+        }
+    }
+
+    /** Hitboxes the target had during the window the attacker could have seen (ping compensated). */
+    private List<BoundingBox> recentBoxes(Player target, Player attacker) {
+        int now = Bukkit.getCurrentTick();
+        int back = 3;
+        if (pingComp) {
+            int ping = Math.min(Math.max(attacker.getPing(), 0), 500);
+            back += ping / 50;
+        }
+        List<BoundingBox> out = new ArrayList<>();
+        out.add(target.getBoundingBox().clone());
+        ArrayDeque<Snap> q = history.get(target.getUniqueId());
+        if (q != null) {
+            for (Snap s : q) {
+                if (s.tick >= now - back) out.add(s.box);
+            }
+        }
+        return out;
     }
 
     // ---------------------------------------------------------------- ProtocolLib
@@ -182,11 +225,6 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
                 });
     }
 
-    /**
-     * Called on the main thread for every swing / attack packet.
-     * At this point vanilla has already processed the packet, so we only schedule
-     * a delayed check to see whether the server registered a hit attempt.
-     */
     private void handleInput(Player p, int entityId) {
         if (!enabled || !p.isOnline() || !canAttack(p)) return;
 
@@ -217,11 +255,13 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
         Integer last = lastAttempt.get(id);
         if (last != null && last >= pend.tick - 1) return;
 
-        // Right-click interactions (placing blocks, using items) also send swing packets
+        // Right-click interactions also send swing packets
         Integer use = lastUse.get(id);
         if (use != null && use >= pend.tick - 2) return;
 
-        Player target = findTarget(attacker, pend);
+        Player target = pend.entityId >= 0
+                ? targetFromPacket(attacker, pend)
+                : findTarget(attacker, pend);
         if (target == null || !validVictim(target)) return;
 
         applyGhostHit(attacker, target, pend.cooldown);
@@ -271,6 +311,7 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
         lastUse.remove(id);
         falls.remove(id);
         pending.remove(id);
+        history.remove(id);
     }
 
     private boolean resetsFall(Player p, Location loc) {
@@ -287,7 +328,6 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
                 || onSolidGround(loc);
     }
 
-    /** Real collision check against block shapes just under the player's feet. */
     private boolean onSolidGround(Location loc) {
         World w = loc.getWorld();
         if (w == null) return false;
@@ -310,7 +350,6 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
     }
 
     // ---------------------------------------------------------------- critical logic
-    /** Same conditions vanilla uses to decide a critical hit. */
     @SuppressWarnings("deprecation")
     private boolean serverWouldCrit(Player p, float cd) {
         return cd > 0.9f
@@ -323,7 +362,6 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
                 && !p.isSprinting();
     }
 
-    /** Our own verification: is the player truly falling right now? */
     private boolean isRealCrit(Player p, float cd) {
         if (cd <= 0.9f) return false;
         if (p.isSprinting() || p.hasPotionEffect(PotionEffectType.BLINDNESS)) return false;
@@ -332,7 +370,6 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
         return !resetsFall(p, p.getLocation());
     }
 
-    /** Base attack damage scaled by the attack cooldown (vanilla formula, without crit). */
     private double scaledBase(Player p, float cd) {
         AttributeInstance attr = p.getAttribute(Attribute.GENERIC_ATTACK_DAMAGE);
         double base = attr != null ? attr.getValue() : 1.0;
@@ -345,11 +382,6 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
         return sharp > 0 ? (0.5 * sharp + 0.5) * cd : 0.0;
     }
 
-    /**
-     * Verifies every attack the server registers:
-     *  - fake critical (glitch / elytra spam)  -> becomes a normal hit
-     *  - real critical registered as normal    -> becomes a critical hit
-     */
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onDamage(EntityDamageByEntityEvent e) {
         if (!enabled || applying) return;
@@ -365,10 +397,10 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
         boolean realCrit = isRealCrit(p, cd);
         if (serverCrit == realCrit) return;
 
-        double half = scaledBase(p, cd) * 0.5; // crit adds +50% of the scaled base damage
+        double half = scaledBase(p, cd) * 0.5;
         e.setDamage(Math.max(0.0, e.getDamage() + (realCrit ? half : -half)));
 
-        if (realCrit) critEffects((Player) e.getEntity(), p);
+        if (realCrit) critEffects((Player) e.getEntity());
     }
 
     // ---------------------------------------------------------------- ghost hit fix
@@ -383,19 +415,18 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
         applyFired = false;
         applyCancelled = false;
         try {
-            // Fires EntityDamageByEntityEvent, so WorldGuard / any protection can cancel it
             target.damage(dmg, attacker);
         } finally {
             applying = false;
         }
 
         if (applyFired && !applyCancelled) {
-            if (crit) critEffects(target, attacker);
+            if (crit) critEffects(target);
             attacker.resetCooldown();
         }
     }
 
-    private void critEffects(Player target, Player attacker) {
+    private void critEffects(Player target) {
         Location l = target.getLocation().add(0, target.getHeight() * 0.5, 0);
         target.getWorld().spawnParticle(Particle.CRIT, l, 15, 0.3, 0.3, 0.3, 0.1);
         target.getWorld().playSound(l, Sound.ENTITY_PLAYER_ATTACK_CRIT, 1f, 1f);
@@ -413,27 +444,57 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
         if (!t.isOnline() || t.isDead() || t.isInvulnerable()) return false;
         GameMode gm = t.getGameMode();
         if (gm != GameMode.SURVIVAL && gm != GameMode.ADVENTURE) return false;
-        // Hit-immunity frames: vanilla would reject this hit normally, so it is not a ghost hit
         return t.getNoDamageTicks() <= t.getMaximumNoDamageTicks() / 2.0;
     }
 
-    /** Server-side ray trace against player hitboxes, blocked by solid blocks. */
+    /** True if a solid block sits between the eye and the point. */
+    private boolean blocked(World w, Vector eye, Vector point) {
+        Vector dir = point.clone().subtract(eye);
+        double len = dir.length();
+        if (len < 1.0E-6) return false;
+        RayTraceResult r = w.rayTraceBlocks(
+                new Location(w, eye.getX(), eye.getY(), eye.getZ()),
+                dir.normalize(), len, FluidCollisionMode.NEVER, true);
+        return r != null;
+    }
+
+    private Vector closestPoint(BoundingBox b, Vector p) {
+        return new Vector(
+                Math.max(b.getMinX(), Math.min(p.getX(), b.getMaxX())),
+                Math.max(b.getMinY(), Math.min(p.getY(), b.getMaxY())),
+                Math.max(b.getMinZ(), Math.min(p.getZ(), b.getMaxZ())));
+    }
+
+    /** The client told us which entity it hit: verify it against the target's recent positions. */
+    private Player targetFromPacket(Player attacker, Pending pend) {
+        World w = attacker.getWorld();
+        Player target = null;
+        for (Player o : w.getPlayers()) {
+            if (o.getEntityId() == pend.entityId) { target = o; break; }
+        }
+        if (target == null || target.equals(attacker) || target.isDead()) return null;
+        if (target.getGameMode() == GameMode.SPECTATOR || !attacker.canSee(target)) return null;
+
+        double maxDist = reach + reachSlack;
+        for (BoundingBox box : recentBoxes(target, attacker)) {
+            Vector closest = closestPoint(box.clone().expand(rayTolerance), pend.eye);
+            if (closest.distance(pend.eye) > maxDist) continue;
+            if (blocked(w, pend.eye, closest)) continue;
+            return target;
+        }
+        return null;
+    }
+
+    /** Swing only (no entity id): ray trace against the recent hitboxes of nearby players. */
     private Player findTarget(Player attacker, Pending pend) {
         World w = attacker.getWorld();
         Vector eye = pend.eye;
         Vector dir = pend.dir;
-
-        double maxDist = reach;
-        RayTraceResult blockHit = w.rayTraceBlocks(
-                new Location(w, eye.getX(), eye.getY(), eye.getZ()),
-                dir, reach, FluidCollisionMode.NEVER, true);
-        if (blockHit != null) {
-            maxDist = blockHit.getHitPosition().distance(eye);
-        }
+        double maxDist = reach + reachSlack;
 
         Player best = null;
-        double bestDist = maxDist;
-        double near = (reach + 2.0) * (reach + 2.0);
+        double bestDist = Double.MAX_VALUE;
+        double near = (reach + 20.0) * (reach + 20.0);
 
         for (Player o : w.getPlayers()) {
             if (o.equals(attacker) || o.isDead()) continue;
@@ -441,18 +502,18 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
             if (!attacker.canSee(o)) continue;
             if (o.getLocation().distanceSquared(attacker.getLocation()) > near) continue;
 
-            BoundingBox box = o.getBoundingBox().expand(rayTolerance);
-            RayTraceResult r = box.rayTrace(eye, dir, maxDist);
-            if (r == null) continue;
-
-            double dist = r.getHitPosition().distance(eye);
-            if (dist <= bestDist) {
-                bestDist = dist;
-                best = o;
+            for (BoundingBox box : recentBoxes(o, attacker)) {
+                RayTraceResult r = box.clone().expand(rayTolerance).rayTrace(eye, dir, maxDist);
+                if (r == null) continue;
+                Vector hit = r.getHitPosition();
+                if (blocked(w, eye, hit)) continue;
+                double dist = hit.distance(eye);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    best = o;
+                }
             }
         }
-
-        if (best != null && pend.entityId >= 0 && best.getEntityId() != pend.entityId) return null;
         return best;
     }
 
@@ -490,4 +551,4 @@ public final class HitSync extends JavaPlugin implements Listener, TabExecutor {
         }
         return out;
     }
-                  }
+}
