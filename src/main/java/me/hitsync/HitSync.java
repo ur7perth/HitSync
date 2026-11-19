@@ -9,17 +9,19 @@ import com.comphenix.protocol.wrappers.EnumWrappers;
 
 import org.bukkit.Bukkit;
 import org.bukkit.World;
+import org.bukkit.attribute.Attribute;
+import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
-import org.bukkit.entity.Entity;
+import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.util.Vector;
 
 import java.util.Map;
 import java.util.UUID;
@@ -29,10 +31,19 @@ public final class HitSync extends JavaPlugin implements Listener {
 
     private volatile boolean ghostHitEnabled = true;
 
+    private static final double MAX_RECOVERY_DISTANCE = 3.2;
+    private static final double MIN_ATTACK_COOLDOWN = 0.85;
+    private static final long RECOVERY_DELAY_TICKS = 2L;
+    private static final long RECOVERY_COOLDOWN_NS = 500_000_000L;
+    private static final long RECORD_EXPIRATION_NS = 5_000_000_000L;
+
     private final Map<AttackKey, AttackPacket> attackPackets =
             new ConcurrentHashMap<>();
 
     private final Map<AttackKey, DamageRecord> damageEvents =
+            new ConcurrentHashMap<>();
+
+    private final Map<AttackKey, Long> recoveryCooldowns =
             new ConcurrentHashMap<>();
 
     private record AttackKey(UUID attackerId, int targetEntityId) {}
@@ -85,6 +96,8 @@ public final class HitSync extends JavaPlugin implements Listener {
 
                             long timestamp = System.nanoTime();
 
+                            damageEvents.remove(key);
+
                             attackPackets.put(
                                     key,
                                     new AttackPacket(timestamp)
@@ -97,7 +110,7 @@ public final class HitSync extends JavaPlugin implements Listener {
                                             key,
                                             timestamp
                                     ),
-                                    2L
+                                    RECOVERY_DELAY_TICKS
                             );
 
                         } catch (Exception exception) {
@@ -116,7 +129,7 @@ public final class HitSync extends JavaPlugin implements Listener {
                 20L
         );
 
-        getLogger().info("HitSync diagnostic system enabled.");
+        getLogger().info("HitSync GhostHit Recovery enabled.");
     }
 
     @Override
@@ -129,6 +142,7 @@ public final class HitSync extends JavaPlugin implements Listener {
 
         attackPackets.clear();
         damageEvents.clear();
+        recoveryCooldowns.clear();
 
         getLogger().info("HitSync disabled.");
     }
@@ -178,7 +192,22 @@ public final class HitSync extends JavaPlugin implements Listener {
             return;
         }
 
-        DamageRecord damage = damageEvents.get(key);
+        attackPackets.remove(key, packet);
+
+        DamageRecord damage = damageEvents.remove(key);
+
+        // The original attack produced a damage event.
+        // Never apply recovery damage in this case.
+        if (damage != null) {
+            if (damage.cancelled()) {
+                getLogger().fine(
+                        "[HitSync] Original damage was cancelled. "
+                                + "Recovery skipped."
+                );
+            }
+
+            return;
+        }
 
         Player target = findTarget(
                 attacker.getWorld(),
@@ -186,83 +215,130 @@ public final class HitSync extends JavaPlugin implements Listener {
         );
 
         if (target == null) {
-
-            getLogger().info(
-                    "[HitSync] Target not found during inspection. "
-                            + "Attacker: " + attacker.getName()
-                            + " | Entity ID: " + key.targetEntityId()
-            );
-
             return;
         }
 
-        double distance = attacker.getLocation()
-                .distance(target.getLocation());
-
-        Vector velocity = target.getVelocity();
-
-        boolean gliding = target.isGliding();
-
-        if (damage == null) {
-
-            getLogger().info(
-                    "[HitSync] No matching damage event."
-                            + " Attacker: " + attacker.getName()
-                            + " | Target: " + target.getName()
-                            + " | Elytra: " + gliding
-                            + " | Distance: " + String.format("%.2f", distance)
-                            + " | Target velocity: "
-                            + String.format(
-                                    "%.2f, %.2f, %.2f",
-                                    velocity.getX(),
-                                    velocity.getY(),
-                                    velocity.getZ()
-                            )
-            );
-
+        // Recovery is only intended for Elytra targets.
+        if (!target.isGliding()) {
             return;
         }
 
-        long difference = Math.abs(
-                damage.timestamp() - packetTimestamp
+        if (!isValidRecoveryTarget(attacker, target)) {
+            return;
+        }
+
+        long now = System.nanoTime();
+
+        Long lastRecovery = recoveryCooldowns.get(key);
+
+        if (lastRecovery != null
+                && now - lastRecovery < RECOVERY_COOLDOWN_NS) {
+            return;
+        }
+
+        double attackCooldown = attacker.getAttackCooldown(0.5f);
+
+        if (attackCooldown < MIN_ATTACK_COOLDOWN) {
+            return;
+        }
+
+        double damageAmount = calculateRecoveryDamage(
+                attacker,
+                attackCooldown
         );
 
-        if (difference > 1_500_000_000L) {
-
-            getLogger().info(
-                    "[HitSync] Damage event timing mismatch."
-                            + " Attacker: " + attacker.getName()
-                            + " | Target: " + target.getName()
-            );
-
+        if (damageAmount <= 0.0) {
             return;
         }
 
-        if (damage.cancelled()) {
-
-            getLogger().info(
-                    "[HitSync] Damage event was cancelled."
-                            + " Attacker: " + attacker.getName()
-                            + " | Target: " + target.getName()
-                            + " | Elytra: " + gliding
-            );
-
-            return;
-        }
+        // Mark the recovery before calling damage to prevent duplicates.
+        recoveryCooldowns.put(key, now);
 
         getLogger().info(
-                "[HitSync] Attack and damage event matched."
-                        + " Attacker: " + attacker.getName()
+                "[HitSync] Elytra GhostHit recovery attempted. "
+                        + "Attacker: " + attacker.getName()
                         + " | Target: " + target.getName()
-                        + " | Elytra: " + gliding
-                        + " | Distance: " + String.format("%.2f", distance)
+                        + " | Damage: " + String.format("%.2f", damageAmount)
         );
+
+        // This fires EntityDamageByEntityEvent.
+        // WorldGuard and other protection plugins can cancel it.
+        target.damage(damageAmount, attacker);
+    }
+
+    private boolean isValidRecoveryTarget(
+            Player attacker,
+            Player target
+    ) {
+
+        if (!attacker.isOnline()
+                || !target.isOnline()
+                || attacker.isDead()
+                || target.isDead()
+                || target.isInvulnerable()) {
+            return false;
+        }
+
+        if (attacker.getWorld() != target.getWorld()) {
+            return false;
+        }
+
+        if (!attacker.getWorld().getPVP()) {
+            return false;
+        }
+
+        if (target.getNoDamageTicks() > 0) {
+            return false;
+        }
+
+        double distanceSquared = attacker.getLocation()
+                .distanceSquared(target.getLocation());
+
+        return distanceSquared <=
+                MAX_RECOVERY_DISTANCE * MAX_RECOVERY_DISTANCE;
+    }
+
+    private double calculateRecoveryDamage(
+            Player attacker,
+            double attackCooldown
+    ) {
+
+        AttributeInstance attackAttribute =
+                attacker.getAttribute(Attribute.GENERIC_ATTACK_DAMAGE);
+
+        if (attackAttribute == null) {
+            return 0.0;
+        }
+
+        ItemStack weapon = attacker.getInventory().getItemInMainHand();
+
+        if (weapon == null || weapon.getType().isAir()) {
+            return 0.0;
+        }
+
+        double baseDamage = attackAttribute.getValue();
+
+        // Minecraft's attack-strength damage scaling.
+        double cooldownMultiplier =
+                attackCooldown * attackCooldown * 0.5 + 0.5;
+
+        double damage = baseDamage * cooldownMultiplier;
+
+        // Sharpness bonus for the held weapon.
+        int sharpnessLevel =
+                weapon.getEnchantmentLevel(Enchantment.DAMAGE_ALL);
+
+        if (sharpnessLevel > 0) {
+            double sharpnessBonus = 0.5 * sharpnessLevel + 0.5;
+            damage += sharpnessBonus * attackCooldown;
+        }
+
+        return Math.max(0.0, damage);
     }
 
     private Player findTarget(World world, int entityId) {
 
         for (Player player : world.getPlayers()) {
-
             if (player.getEntityId() == entityId) {
                 return player;
             }
@@ -274,14 +350,20 @@ public final class HitSync extends JavaPlugin implements Listener {
     private void cleanOldRecords() {
 
         long now = System.nanoTime();
-        long expiration = 5_000_000_000L;
 
         attackPackets.entrySet().removeIf(
-                entry -> now - entry.getValue().timestamp() > expiration
+                entry -> now - entry.getValue().timestamp()
+                        > RECORD_EXPIRATION_NS
         );
 
         damageEvents.entrySet().removeIf(
-                entry -> now - entry.getValue().timestamp() > expiration
+                entry -> now - entry.getValue().timestamp()
+                        > RECORD_EXPIRATION_NS
+        );
+
+        recoveryCooldowns.entrySet().removeIf(
+                entry -> now - entry.getValue()
+                        > RECORD_EXPIRATION_NS
         );
     }
 
@@ -295,6 +377,10 @@ public final class HitSync extends JavaPlugin implements Listener {
         );
 
         damageEvents.keySet().removeIf(
+                key -> key.attackerId().equals(playerId)
+        );
+
+        recoveryCooldowns.keySet().removeIf(
                 key -> key.attackerId().equals(playerId)
         );
     }
