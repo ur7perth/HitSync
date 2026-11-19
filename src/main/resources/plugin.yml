@@ -1,16 +1,16 @@
 
 name: HitSync
-version: 2.0.0
+version: 3.0.0
 main: me.hitsync.HitSync
-api-version: '1.20'
+api-version: '1.21'
 
 depend:
   - ProtocolLib
 
 commands:
-  GhostHit:
-    description: Enable or disable HitSync
-    usage: /GhostHit <On|Off>
+  HitSync:
+    description: HitSync main command
+    usage: /HitSync
     permission: hitsync.admin
 
 permissions:
