@@ -1,56 +1,53 @@
 prefix: "&eHitSync"
 
-alert-format: "{prefix} &7» &c{attacker} &7ghost hit &f{target} &8[{status}&8] &7ping &f{ping}ms &7reach &f{reach}"
+alert-format: "{prefix} &7- &c{attacker} &7ghost hit &f{target} &8[{status}&8] &7ping &f{ping}ms &7reach &f{reach}"
 
-# true = prints a debug line to the console for every fixed hit
+# prints a line to the console for every fixed hit
 debug: false
 
-# Every feature can be switched on/off with /hitsync toggle <feature>
 features:
   detector: true
   alerts: true
   auto-fix: true
-  wall-protection: true
 
 detector:
-  # max distance (blocks) of the aim ray, measured to the expanded hitbox
-  reach: 3.5
-  # hitbox expansion (blocks) for aim tolerance
-  aim-leniency: 0.10
-  combo-leniency-bonus: 0.10
+  # max aim distance (blocks) measured to the expanded hitbox
+  reach: 3.6
+  # hitbox expansion for aim tolerance
+  aim-leniency: 0.12
+  combo-leniency-bonus: 0.08
   check-delay-ticks: 1
+  # attacks processed within this many ticks of the swing = not a ghost
+  processed-window-ticks: 1
   # caps the ping used for rewinding (anti-abuse)
-  max-rewind-ms: 300
-  # extra ticks the client shows other players behind real time
+  max-rewind-ms: 350
+  # ticks the client shows other players behind real time
   client-interp-ticks: 1.0
-  # target is checked at (rewind - jitter, rewind, rewind + jitter)
-  rewind-jitter-ticks: 1.0
-  # 0.0 = 1.8 style (no cooldown), 0.8+ = ignores spam swings on 1.9+ combat
+  # the target is checked around the rewound time +- this many ticks
+  rewind-jitter-ticks: 1.5
+  # ignore swings when a block is between attacker and target
+  block-check: true
+  # 0.0 = 1.8 style, 0.8+ = ignore spam swings on 1.9+ combat
   min-attack-strength: 0.0
   treat-invulnerability-as-ghost: false
   # 0 = show every alert
   alert-cooldown-ms: 0
 
 auto-fix:
-  # hits farther than this are never fixed (protects against reach hacks)
-  max-reach: 3.8
+  # hits farther than this are never fixed
+  max-reach: 3.9
   max-fixes-per-second: 20
-  # i-frames shorter than this many ticks do not block a fix
   iframe-tolerance-ticks: 2
-  # clear i-frames before the fixed hit so full damage lands
+  # clear i-frames so the fixed hit lands with full damage
   reset-iframes: true
-  # full attack cooldown for the fixed hit (recommended)
+  # full attack cooldown for the fixed hit
   full-cooldown: true
-  # scales horizontal knockback after the hit (1.0 = vanilla/your knockback plugin)
+  # scales the knockback after the hit (1.0 = unchanged)
   knockback-multiplier: 1.0
+  # guarantees a minimum knockback so the combo never breaks
+  # (set 0 to disable, vanilla is about 0.4)
+  min-horizontal-kb: 0.32
+  min-vertical-kb: 0.30
 
 combo:
   window-ticks: 30
-
-wall-protection:
-  inside-blocks: true
-  pinned-against-wall: true
-  # false = protects every hit, true = only protects follow-up combo hits
-  require-combo: false
-  # how close to a wall counts as "pinned"
-  pin-distance: 0.5
