@@ -3,20 +3,20 @@ version: '${project.version}'
 main: com.nerith.hitsync.NerithMcHitSync
 api-version: '1.21'
 author: Nerith
-description: Ghost hit detector with automatic hit sync and wall combo protection.
+description: Ghost hit detector with automatic hit sync.
 
 commands:
   hitsync:
     description: NerithMcHitSync main command
-    usage: /<command> [status|toggle <feature>|alerts|reload]
+    usage: /<command> [status|toggle|alerts|stats|debug|reload]
     aliases: [hs]
 
 permissions:
   nerithmchitsync.admin:
-    description: Use /hitsync toggle, reload and status
+    description: Use toggle, stats, debug, reload and status
     default: op
   nerithmchitsync.alerts:
-    description: Receive ghost hit alerts (ops always receive them)
+    description: Receive ghost hit alerts
     default: op
   nerithmchitsync.autofix:
     description: Allow auto hit sync for this player
