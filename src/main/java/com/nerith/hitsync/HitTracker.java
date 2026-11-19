@@ -4,7 +4,10 @@ import org.bukkit.Bukkit;
 import org.bukkit.FluidCollisionMode;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
+import org.bukkit.attribute.Attribute;
+import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -14,6 +17,8 @@ import org.bukkit.event.entity.EntityDamageEvent.DamageCause;
 import org.bukkit.event.player.PlayerAnimationEvent;
 import org.bukkit.event.player.PlayerAnimationType;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.potion.PotionEffectType;
 import org.bukkit.util.BoundingBox;
 import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
@@ -30,9 +35,8 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Part 1: detects ghost hits (swing aimed at a player that the server never counted).
- * Part 2: instantly re-applies the hit on the server and keeps the combo alive.
- * Uses lag compensation: the target's past positions are checked based on attacker ping.
+ * Part 1: detects ghost hits using lag-compensated (rewound + interpolated) target positions.
+ * Part 2: re-applies the hit with real damage (attribute + sharpness + strength) and knockback.
  */
 public final class HitTracker implements Listener {
 
@@ -57,6 +61,7 @@ public final class HitTracker implements Listener {
     private final Map<UUID, Combo> combos = new HashMap<>();
     private final Map<UUID, Deque<Long>> fixTimes = new HashMap<>();
     private final Map<UUID, Long> lastAlert = new HashMap<>();
+    private final Map<UUID, Integer> lastSwing = new HashMap<>();
     private final Map<UUID, Deque<Snap>> history = new HashMap<>();
     private final Set<UUID> mutedAlerts = new HashSet<>();
 
@@ -73,8 +78,36 @@ public final class HitTracker implements Listener {
         for (Player p : Bukkit.getOnlinePlayers()) {
             Deque<Snap> d = history.computeIfAbsent(p.getUniqueId(), k -> new ArrayDeque<>());
             d.addLast(new Snap(now, p.getBoundingBox()));
-            while (d.size() > 40) d.pollFirst();
+            while (d.size() > 20) d.pollFirst();
         }
+    }
+
+    /** Interpolated bounding box of a player at a (fractional) past tick. */
+    private BoundingBox boxAt(UUID id, double t) {
+        Deque<Snap> d = history.get(id);
+        if (d == null || d.isEmpty()) return null;
+        Snap prev = null;
+        Snap next = null;
+        for (Snap s : d) {
+            if (s.tick() <= t) {
+                prev = s;
+            } else {
+                next = s;
+                break;
+            }
+        }
+        if (prev == null) return d.peekFirst().box();
+        if (next == null) return prev.box();
+        double f = (t - prev.tick()) / (double) (next.tick() - prev.tick());
+        BoundingBox a = prev.box();
+        BoundingBox b = next.box();
+        return BoundingBox.of(
+                new Vector(lerp(a.getMinX(), b.getMinX(), f), lerp(a.getMinY(), b.getMinY(), f), lerp(a.getMinZ(), b.getMinZ(), f)),
+                new Vector(lerp(a.getMaxX(), b.getMaxX(), f), lerp(a.getMaxY(), b.getMaxY(), f), lerp(a.getMaxZ(), b.getMaxZ(), f)));
+    }
+
+    private static double lerp(double a, double b, double f) {
+        return a + (b - a) * f;
     }
 
     // ------------------------------------------------------------------
@@ -114,25 +147,37 @@ public final class HitTracker implements Listener {
         Player attacker = e.getPlayer();
         if (attacker.isDead() || !isPvpMode(attacker)) return;
 
+        int now = Bukkit.getCurrentTick();
+        UUID aId = attacker.getUniqueId();
+
+        // one swing per tick
+        Integer prevSwing = lastSwing.put(aId, now);
+        if (prevSwing != null && prevSwing == now) return;
+
         FileConfiguration cfg = plugin.getConfig();
-        double reach = cfg.getDouble("detector.reach", 3.6);
-        double size = cfg.getDouble("detector.aim-leniency", 0.15);
+        if (attacker.getCooledAttackStrength(0f) < cfg.getDouble("detector.min-attack-strength", 0.0)) return;
+
+        double reach = cfg.getDouble("detector.reach", 3.5);
+        double size = cfg.getDouble("detector.aim-leniency", 0.10);
         if (hasActiveCombo(attacker)) {
-            size += cfg.getDouble("detector.combo-leniency-bonus", 0.15);
+            size += cfg.getDouble("detector.combo-leniency-bonus", 0.10);
         }
 
         Location eye = attacker.getEyeLocation();
         Vector start = eye.toVector();
         Vector dir = eye.getDirection();
-        int now = Bukkit.getCurrentTick();
-        int pingTicks = (int) Math.round(attacker.getPing() / 50.0);
+
+        double maxRewindMs = cfg.getDouble("detector.max-rewind-ms", 300);
+        double pingMs = Math.min(Math.max(attacker.getPing(), 0), maxRewindMs);
+        double rewindTicks = pingMs / 50.0 + cfg.getDouble("detector.client-interp-ticks", 1.0);
+        double jitter = cfg.getDouble("detector.rewind-jitter-ticks", 1.0);
 
         Player best = null;
         double bestDist = Double.MAX_VALUE;
         for (Player pl : attacker.getWorld().getPlayers()) {
             if (pl.equals(attacker) || pl.getGameMode() == GameMode.SPECTATOR || !attacker.canSee(pl)) continue;
-            if (pl.getLocation().distanceSquared(eye) > 100) continue;
-            double d = rayDistance(start, dir, pl, now, pingTicks, size, reach);
+            if (pl.getLocation().distanceSquared(eye) > 144) continue;
+            double d = rayDistance(start, dir, pl, now - rewindTicks, jitter, size, reach);
             if (d >= 0 && d < bestDist) {
                 bestDist = d;
                 best = pl;
@@ -146,7 +191,6 @@ public final class HitTracker implements Listener {
             return;
         }
 
-        final UUID aId = attacker.getUniqueId();
         final UUID tId = best.getUniqueId();
         final double dist = bestDist;
         long delay = Math.max(1, cfg.getInt("detector.check-delay-ticks", 1));
@@ -155,21 +199,27 @@ public final class HitTracker implements Listener {
     }
 
     /** Distance to the target along the ray (current + rewound positions), or -1 if missed. */
-    private double rayDistance(Vector start, Vector dir, Player target, int now,
-                               int pingTicks, double size, double reach) {
+    private double rayDistance(Vector start, Vector dir, Player target, double t,
+                               double jitter, double size, double reach) {
         List<BoundingBox> boxes = new ArrayList<>();
         boxes.add(target.getBoundingBox());
-        Deque<Snap> d = history.get(target.getUniqueId());
-        if (d != null) {
-            for (Snap s : d) {
-                if (Math.abs(s.tick() - (now - pingTicks)) <= 2) boxes.add(s.box());
-            }
+        UUID id = target.getUniqueId();
+        for (double dt : new double[]{-jitter, 0, jitter}) {
+            BoundingBox b = boxAt(id, t + dt);
+            if (b != null) boxes.add(b);
         }
+
         double best = -1;
         for (BoundingBox b : boxes) {
-            RayTraceResult r = b.clone().expand(size).rayTrace(start, dir, reach);
-            if (r == null) continue;
-            double dist = r.getHitPosition().distance(start);
+            BoundingBox big = b.clone().expand(size);
+            double dist;
+            if (big.contains(start)) {
+                dist = 0;
+            } else {
+                RayTraceResult r = big.rayTrace(start, dir, reach);
+                if (r == null) continue;
+                dist = r.getHitPosition().distance(start);
+            }
             if (best < 0 || dist < best) best = dist;
         }
         return best;
@@ -185,28 +235,30 @@ public final class HitTracker implements Listener {
         if (at != null && at.tick() >= swingTick - 1) return;
 
         if (target.isDead() || !isPvpMode(target) || target.isInvulnerable()) return;
+        if (!attacker.getWorld().equals(target.getWorld())) return;
 
         FileConfiguration cfg = plugin.getConfig();
-        boolean iframes = target.getNoDamageTicks() > target.getMaximumNoDamageTicks() / 2.0;
-        if (iframes && !cfg.getBoolean("detector.treat-invulnerability-as-ghost", false)) return;
+        double tolerance = cfg.getInt("auto-fix.iframe-tolerance-ticks", 2);
+        double remaining = target.getNoDamageTicks() - target.getMaximumNoDamageTicks() / 2.0;
+        boolean blockedByIframes = remaining > tolerance;
+        if (blockedByIframes && !cfg.getBoolean("detector.treat-invulnerability-as-ghost", false)) return;
 
         boolean fixed = false;
-        if (plugin.enabled("auto-fix") && !iframes) {
+        if (plugin.enabled("auto-fix") && !blockedByIframes) {
             fixed = tryFix(attacker, target, dist);
         }
         alert(attacker, target, fixed, dist);
     }
 
     // ------------------------------------------------------------------
-    // Part 2: instant server-side fix
+    // Part 2: real damage + knockback
     // ------------------------------------------------------------------
     private boolean tryFix(Player attacker, Player target, double dist) {
         if (!attacker.hasPermission("nerithmchitsync.autofix")) return false;
         if (attacker.isDead() || !isPvpMode(attacker)) return false;
-        if (!attacker.getWorld().equals(target.getWorld())) return false;
 
         FileConfiguration cfg = plugin.getConfig();
-        if (dist > cfg.getDouble("auto-fix.max-reach", 4.0)) return false;
+        if (dist > cfg.getDouble("auto-fix.max-reach", 3.8)) return false;
 
         int max = cfg.getInt("auto-fix.max-fixes-per-second", 20);
         Deque<Long> times = fixTimes.computeIfAbsent(attacker.getUniqueId(), k -> new ArrayDeque<>());
@@ -215,10 +267,84 @@ public final class HitTracker implements Listener {
         if (times.size() >= max) return false;
         times.addLast(now);
 
-        // Real attack: fires EntityDamageByEntityEvent, so knockback, enchants,
-        // other plugins and the combo counter all behave normally.
-        attacker.attack(target);
+        double damage = computeDamage(attacker, cfg);
+
+        // The player's client already had the hit, so the old i-frames are treated as expired.
+        if (cfg.getBoolean("auto-fix.reset-iframes", true)) {
+            target.setNoDamageTicks(0);
+        }
+
+        // Fires EntityDamageByEntityEvent (other plugins, wall guard and the combo counter all see it).
+        target.damage(damage, attacker);
+
+        boolean landed = target.getNoDamageTicks() > target.getMaximumNoDamageTicks() / 2.0;
+        if (!landed) return false;
+
+        applyExtras(attacker, target, cfg);
         return true;
+    }
+
+    /** Damage from the attack attribute (includes Strength / Weakness / weapon) + Sharpness + crit. */
+    private double computeDamage(Player attacker, FileConfiguration cfg) {
+        AttributeInstance attr = attacker.getAttribute(Attribute.GENERIC_ATTACK_DAMAGE);
+        double base = attr != null ? attr.getValue() : 1.0;
+
+        ItemStack item = attacker.getInventory().getItemInMainHand();
+        double enchant = 0;
+        if (item != null && !item.getType().isAir()) {
+            int sharp = item.getEnchantmentLevel(Enchantment.SHARPNESS);
+            if (sharp > 0) enchant += 0.5 * sharp + 0.5;
+        }
+
+        double scale = 1.0;
+        if (cfg.getBoolean("auto-fix.use-cooldown", false)) {
+            scale = attacker.getCooledAttackStrength(0.5f);
+            base *= 0.2 + scale * scale * 0.8;
+            enchant *= scale;
+        }
+
+        if (cfg.getBoolean("auto-fix.crits", true) && scale > 0.9 && isCrit(attacker)) {
+            base *= 1.5;
+        }
+        return Math.max(0.0, base + enchant);
+    }
+
+    private boolean isCrit(Player p) {
+        return p.getFallDistance() > 0.0f
+                && !p.isOnGround()
+                && !p.isClimbing()
+                && !p.isInWater()
+                && !p.isSprinting()
+                && !p.isInsideVehicle()
+                && !p.hasPotionEffect(PotionEffectType.BLINDNESS);
+    }
+
+    /** Knockback enchant, sprint knockback, attack-knockback attribute and Fire Aspect. */
+    private void applyExtras(Player attacker, Player target, FileConfiguration cfg) {
+        ItemStack item = attacker.getInventory().getItemInMainHand();
+
+        double kb = 0;
+        AttributeInstance kbAttr = attacker.getAttribute(Attribute.GENERIC_ATTACK_KNOCKBACK);
+        if (kbAttr != null) kb += kbAttr.getValue();
+        if (item != null && !item.getType().isAir()) {
+            kb += item.getEnchantmentLevel(Enchantment.KNOCKBACK);
+            int fire = item.getEnchantmentLevel(Enchantment.FIRE_ASPECT);
+            if (fire > 0) target.setFireTicks(Math.max(target.getFireTicks(), fire * 80));
+        }
+        if (attacker.isSprinting()) kb += 1;
+
+        double mult = cfg.getDouble("auto-fix.knockback-multiplier", 1.0);
+        if (kb > 0 && cfg.getBoolean("auto-fix.extra-knockback", true)) {
+            Vector dir = target.getLocation().toVector()
+                    .subtract(attacker.getLocation().toVector())
+                    .setY(0);
+            if (dir.lengthSquared() > 1.0E-6) {
+                dir.normalize().multiply(kb * 0.5 * mult);
+                Vector v = target.getVelocity().add(dir);
+                v.setY(Math.min(0.4, Math.max(v.getY(), 0.1)));
+                target.setVelocity(v);
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -289,6 +415,7 @@ public final class HitTracker implements Listener {
         combos.remove(id);
         fixTimes.remove(id);
         lastAlert.remove(id);
+        lastSwing.remove(id);
         history.remove(id);
     }
 }
