@@ -19,9 +19,11 @@ import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -30,10 +32,13 @@ import java.util.UUID;
 /**
  * Part 1: detects ghost hits (swing aimed at a player that the server never counted).
  * Part 2: instantly re-applies the hit on the server and keeps the combo alive.
+ * Uses lag compensation: the target's past positions are checked based on attacker ping.
  */
 public final class HitTracker implements Listener {
 
-    private record Attempt(UUID target, int tick) {}
+    private record Attempt(int tick) {}
+
+    private record Snap(int tick, BoundingBox box) {}
 
     private static final class Combo {
         UUID target;
@@ -52,10 +57,24 @@ public final class HitTracker implements Listener {
     private final Map<UUID, Combo> combos = new HashMap<>();
     private final Map<UUID, Deque<Long>> fixTimes = new HashMap<>();
     private final Map<UUID, Long> lastAlert = new HashMap<>();
+    private final Map<UUID, Deque<Snap>> history = new HashMap<>();
     private final Set<UUID> mutedAlerts = new HashSet<>();
 
     public HitTracker(NerithMcHitSync plugin) {
         this.plugin = plugin;
+        Bukkit.getScheduler().runTaskTimer(plugin, this::snapshot, 1L, 1L);
+    }
+
+    // ------------------------------------------------------------------
+    // Position history (for lag compensation)
+    // ------------------------------------------------------------------
+    private void snapshot() {
+        int now = Bukkit.getCurrentTick();
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            Deque<Snap> d = history.computeIfAbsent(p.getUniqueId(), k -> new ArrayDeque<>());
+            d.addLast(new Snap(now, p.getBoundingBox()));
+            while (d.size() > 40) d.pollFirst();
+        }
     }
 
     // ------------------------------------------------------------------
@@ -71,7 +90,7 @@ public final class HitTracker implements Listener {
         UUID vId = victim.getUniqueId();
 
         // Even a cancelled hit (WorldGuard, wall guard...) counts as "handled", never a ghost.
-        attempts.put(aId, new Attempt(vId, now));
+        attempts.put(aId, new Attempt(now));
         if (e.isCancelled()) return;
 
         int window = plugin.getConfig().getInt("combo.window-ticks", 30);
@@ -87,7 +106,7 @@ public final class HitTracker implements Listener {
     // ------------------------------------------------------------------
     // Reads every swing and checks what the crosshair is on
     // ------------------------------------------------------------------
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    @EventHandler(priority = EventPriority.MONITOR)
     public void onSwing(PlayerAnimationEvent e) {
         if (!plugin.enabled("detector")) return;
         if (e.getAnimationType() != PlayerAnimationType.ARM_SWING) return;
@@ -96,38 +115,74 @@ public final class HitTracker implements Listener {
         if (attacker.isDead() || !isPvpMode(attacker)) return;
 
         FileConfiguration cfg = plugin.getConfig();
-        double reach = cfg.getDouble("detector.reach", 3.1);
-        double size = cfg.getDouble("detector.aim-leniency", 0.10);
+        double reach = cfg.getDouble("detector.reach", 3.6);
+        double size = cfg.getDouble("detector.aim-leniency", 0.15);
         if (hasActiveCombo(attacker)) {
             size += cfg.getDouble("detector.combo-leniency-bonus", 0.15);
         }
 
         Location eye = attacker.getEyeLocation();
-        RayTraceResult result = attacker.getWorld().rayTrace(
-                eye, eye.getDirection(), reach, FluidCollisionMode.NEVER, true, size,
-                en -> en instanceof Player pl
-                        && !pl.equals(attacker)
-                        && pl.getGameMode() != GameMode.SPECTATOR
-                        && attacker.canSee(pl));
+        Vector start = eye.toVector();
+        Vector dir = eye.getDirection();
+        int now = Bukkit.getCurrentTick();
+        int pingTicks = (int) Math.round(attacker.getPing() / 50.0);
 
-        if (result == null || !(result.getHitEntity() instanceof Player target)) return;
+        Player best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (Player pl : attacker.getWorld().getPlayers()) {
+            if (pl.equals(attacker) || pl.getGameMode() == GameMode.SPECTATOR || !attacker.canSee(pl)) continue;
+            if (pl.getLocation().distanceSquared(eye) > 100) continue;
+            double d = rayDistance(start, dir, pl, now, pingTicks, size, reach);
+            if (d >= 0 && d < bestDist) {
+                bestDist = d;
+                best = pl;
+            }
+        }
+        if (best == null) return;
+
+        // A block between the attacker and the target means it was not a real hit attempt.
+        if (bestDist > 0.1 && attacker.getWorld().rayTraceBlocks(
+                eye, dir, bestDist, FluidCollisionMode.NEVER, true) != null) {
+            return;
+        }
 
         final UUID aId = attacker.getUniqueId();
-        final UUID tId = target.getUniqueId();
-        final int swingTick = Bukkit.getCurrentTick();
-        long delay = Math.max(1, cfg.getInt("detector.check-delay-ticks", 2));
+        final UUID tId = best.getUniqueId();
+        final double dist = bestDist;
+        long delay = Math.max(1, cfg.getInt("detector.check-delay-ticks", 1));
 
-        Bukkit.getScheduler().runTaskLater(plugin, () -> verify(aId, tId, swingTick), delay);
+        Bukkit.getScheduler().runTaskLater(plugin, () -> verify(aId, tId, now, dist), delay);
     }
 
-    private void verify(UUID aId, UUID tId, int swingTick) {
+    /** Distance to the target along the ray (current + rewound positions), or -1 if missed. */
+    private double rayDistance(Vector start, Vector dir, Player target, int now,
+                               int pingTicks, double size, double reach) {
+        List<BoundingBox> boxes = new ArrayList<>();
+        boxes.add(target.getBoundingBox());
+        Deque<Snap> d = history.get(target.getUniqueId());
+        if (d != null) {
+            for (Snap s : d) {
+                if (Math.abs(s.tick() - (now - pingTicks)) <= 2) boxes.add(s.box());
+            }
+        }
+        double best = -1;
+        for (BoundingBox b : boxes) {
+            RayTraceResult r = b.clone().expand(size).rayTrace(start, dir, reach);
+            if (r == null) continue;
+            double dist = r.getHitPosition().distance(start);
+            if (best < 0 || dist < best) best = dist;
+        }
+        return best;
+    }
+
+    private void verify(UUID aId, UUID tId, int swingTick, double dist) {
         Player attacker = Bukkit.getPlayer(aId);
         Player target = Bukkit.getPlayer(tId);
         if (attacker == null || target == null || !attacker.isOnline() || !target.isOnline()) return;
 
-        // Did the server process this hit? Then it is not a ghost.
+        // One swing = one attack. If the server processed an attack for this swing, it is not a ghost.
         Attempt at = attempts.get(aId);
-        if (at != null && at.tick() >= swingTick - 1 && at.target().equals(tId)) return;
+        if (at != null && at.tick() >= swingTick - 1) return;
 
         if (target.isDead() || !isPvpMode(target) || target.isInvulnerable()) return;
 
@@ -136,24 +191,24 @@ public final class HitTracker implements Listener {
         if (iframes && !cfg.getBoolean("detector.treat-invulnerability-as-ghost", false)) return;
 
         boolean fixed = false;
-        if (plugin.enabled("auto-fix")) {
-            fixed = tryFix(attacker, target);
+        if (plugin.enabled("auto-fix") && !iframes) {
+            fixed = tryFix(attacker, target, dist);
         }
-        alert(attacker, target, fixed);
+        alert(attacker, target, fixed, dist);
     }
 
     // ------------------------------------------------------------------
     // Part 2: instant server-side fix
     // ------------------------------------------------------------------
-    private boolean tryFix(Player attacker, Player target) {
+    private boolean tryFix(Player attacker, Player target, double dist) {
         if (!attacker.hasPermission("nerithmchitsync.autofix")) return false;
         if (attacker.isDead() || !isPvpMode(attacker)) return false;
         if (!attacker.getWorld().equals(target.getWorld())) return false;
 
         FileConfiguration cfg = plugin.getConfig();
-        if (reachTo(attacker, target) > cfg.getDouble("auto-fix.max-reach", 3.4)) return false;
+        if (dist > cfg.getDouble("auto-fix.max-reach", 4.0)) return false;
 
-        int max = cfg.getInt("auto-fix.max-fixes-per-second", 10);
+        int max = cfg.getInt("auto-fix.max-fixes-per-second", 20);
         Deque<Long> times = fixTimes.computeIfAbsent(attacker.getUniqueId(), k -> new ArrayDeque<>());
         long now = System.currentTimeMillis();
         while (!times.isEmpty() && now - times.peekFirst() > 1000) times.pollFirst();
@@ -166,26 +221,17 @@ public final class HitTracker implements Listener {
         return true;
     }
 
-    private double reachTo(Player attacker, Player target) {
-        Vector eye = attacker.getEyeLocation().toVector();
-        BoundingBox bb = target.getBoundingBox();
-        double x = Math.max(bb.getMinX(), Math.min(eye.getX(), bb.getMaxX()));
-        double y = Math.max(bb.getMinY(), Math.min(eye.getY(), bb.getMaxY()));
-        double z = Math.max(bb.getMinZ(), Math.min(eye.getZ(), bb.getMaxZ()));
-        return eye.distance(new Vector(x, y, z));
-    }
-
     // ------------------------------------------------------------------
     // Alerts (ops / permission holders)
     // ------------------------------------------------------------------
-    private void alert(Player attacker, Player target, boolean fixed) {
+    private void alert(Player attacker, Player target, boolean fixed, double dist) {
         if (!plugin.enabled("alerts")) return;
 
         FileConfiguration cfg = plugin.getConfig();
         long now = System.currentTimeMillis();
-        long cooldown = cfg.getLong("detector.alert-cooldown-ms", 1000);
+        long cooldown = cfg.getLong("detector.alert-cooldown-ms", 0);
         Long last = lastAlert.get(attacker.getUniqueId());
-        if (last != null && now - last < cooldown) return;
+        if (cooldown > 0 && last != null && now - last < cooldown) return;
         lastAlert.put(attacker.getUniqueId(), now);
 
         String format = cfg.getString("alert-format",
@@ -196,7 +242,7 @@ public final class HitTracker implements Listener {
                 .replace("{target}", target.getName())
                 .replace("{status}", fixed ? "&aAuto-fixed" : "&cNot fixed")
                 .replace("{ping}", String.valueOf(attacker.getPing()))
-                .replace("{reach}", String.format(Locale.ROOT, "%.2f", reachTo(attacker, target))));
+                .replace("{reach}", String.format(Locale.ROOT, "%.2f", dist)));
 
         for (Player online : Bukkit.getOnlinePlayers()) {
             boolean allowed = online.isOp() || online.hasPermission("nerithmchitsync.alerts");
@@ -228,8 +274,7 @@ public final class HitTracker implements Listener {
         Combo c = combos.get(attacker.getUniqueId());
         if (c == null || !c.target.equals(victim.getUniqueId())) return false;
         int window = plugin.getConfig().getInt("combo.window-ticks", 30);
-        int min = plugin.getConfig().getInt("wall-protection.min-combo-hits", 1);
-        return Bukkit.getCurrentTick() - c.last <= window && c.count >= min;
+        return Bukkit.getCurrentTick() - c.last <= window && c.count >= 1;
     }
 
     private boolean isPvpMode(Player p) {
@@ -244,5 +289,6 @@ public final class HitTracker implements Listener {
         combos.remove(id);
         fixTimes.remove(id);
         lastAlert.remove(id);
+        history.remove(id);
     }
 }
