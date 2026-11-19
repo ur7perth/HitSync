@@ -4,10 +4,11 @@ import org.bukkit.Bukkit;
 import org.bukkit.FluidCollisionMode;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
+import org.bukkit.NamespacedKey;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
+import org.bukkit.attribute.AttributeModifier;
 import org.bukkit.configuration.file.FileConfiguration;
-import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -17,8 +18,6 @@ import org.bukkit.event.entity.EntityDamageEvent.DamageCause;
 import org.bukkit.event.player.PlayerAnimationEvent;
 import org.bukkit.event.player.PlayerAnimationType;
 import org.bukkit.event.player.PlayerQuitEvent;
-import org.bukkit.inventory.ItemStack;
-import org.bukkit.potion.PotionEffectType;
 import org.bukkit.util.BoundingBox;
 import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
@@ -36,7 +35,7 @@ import java.util.UUID;
 
 /**
  * Part 1: detects ghost hits using lag-compensated (rewound + interpolated) target positions.
- * Part 2: re-applies the hit with real damage (attribute + sharpness + strength) and knockback.
+ * Part 2: re-applies the hit with the real vanilla attack (attacker.attack(target)).
  */
 public final class HitTracker implements Listener {
 
@@ -251,7 +250,7 @@ public final class HitTracker implements Listener {
     }
 
     // ------------------------------------------------------------------
-    // Part 2: real damage + knockback
+    // Part 2: real vanilla attack
     // ------------------------------------------------------------------
     private boolean tryFix(Player attacker, Player target, double dist) {
         if (!attacker.hasPermission("nerithmchitsync.autofix")) return false;
@@ -267,155 +266,41 @@ public final class HitTracker implements Listener {
         if (times.size() >= max) return false;
         times.addLast(now);
 
-        double damage = computeDamage(attacker, cfg);
-
-        // The player's client already had the hit, so the old i-frames are treated as expired.
+        // The attacker's client already had the hit, so old i-frames are treated as expired.
         if (cfg.getBoolean("auto-fix.reset-iframes", true)) {
             target.setNoDamageTicks(0);
+            target.setLastDamage(0);
         }
 
-        // Fires EntityDamageByEntityEvent (other plugins, wall guard and the combo counter all see it).
-        target.damage(damage, attacker);
+        double before = target.getHealth() + target.getAbsorptionAmount();
 
-        boolean landed = target.getNoDamageTicks() > target.getMaximumNoDamageTicks() / 2.0;
-        if (!landed) return false;
-
-        applyExtras(attacker, target, cfg);
-        return true;
-    }
-
-    /** Damage from the attack attribute (includes Strength / Weakness / weapon) + Sharpness + crit. */
-    private double computeDamage(Player attacker, FileConfiguration cfg) {
-        AttributeInstance attr = attacker.getAttribute(Attribute.GENERIC_ATTACK_DAMAGE);
-        double base = attr != null ? attr.getValue() : 1.0;
-
-        ItemStack item = attacker.getInventory().getItemInMainHand();
-        double enchant = 0;
-        if (item != null && !item.getType().isAir()) {
-            int sharp = item.getEnchantmentLevel(Enchantment.SHARPNESS);
-            if (sharp > 0) enchant += 0.5 * sharp + 0.5;
+        // Full attack cooldown for this one attack (no damage scaling), removed right after.
+        AttributeInstance speed = attacker.getAttribute(Attribute.GENERIC_ATTACK_SPEED);
+        AttributeModifier mod = null;
+        if (speed != null && cfg.getBoolean("auto-fix.full-cooldown", true)) {
+            mod = new AttributeModifier(new NamespacedKey(plugin, "fullcooldown"),
+                    500, AttributeModifier.Operation.ADD_NUMBER);
+            speed.addTransientModifier(mod);
+        }
+        try {
+            // Real vanilla attack: attribute damage (Strength/Weakness/weapon), Sharpness,
+            // crit, Knockback, sprint knockback, Fire Aspect, and every other plugin's events.
+            attacker.attack(target);
+        } finally {
+            if (speed != null && mod != null) speed.removeModifier(mod);
         }
 
-        double scale = 1.0;
-        if (cfg.getBoolean("auto-fix.use-cooldown", false)) {
-            scale = attacker.getCooledAttackStrength(0.5f);
-            base *= 0.2 + scale * scale * 0.8;
-            enchant *= scale;
-        }
-
-        if (cfg.getBoolean("auto-fix.crits", true) && scale > 0.9 && isCrit(attacker)) {
-            base *= 1.5;
-        }
-        return Math.max(0.0, base + enchant);
-    }
-
-    private boolean isCrit(Player p) {
-        return p.getFallDistance() > 0.0f
-                && !p.isOnGround()
-                && !p.isClimbing()
-                && !p.isInWater()
-                && !p.isSprinting()
-                && !p.isInsideVehicle()
-                && !p.hasPotionEffect(PotionEffectType.BLINDNESS);
-    }
-
-    /** Knockback enchant, sprint knockback, attack-knockback attribute and Fire Aspect. */
-    private void applyExtras(Player attacker, Player target, FileConfiguration cfg) {
-        ItemStack item = attacker.getInventory().getItemInMainHand();
-
-        double kb = 0;
-        AttributeInstance kbAttr = attacker.getAttribute(Attribute.GENERIC_ATTACK_KNOCKBACK);
-        if (kbAttr != null) kb += kbAttr.getValue();
-        if (item != null && !item.getType().isAir()) {
-            kb += item.getEnchantmentLevel(Enchantment.KNOCKBACK);
-            int fire = item.getEnchantmentLevel(Enchantment.FIRE_ASPECT);
-            if (fire > 0) target.setFireTicks(Math.max(target.getFireTicks(), fire * 80));
-        }
-        if (attacker.isSprinting()) kb += 1;
+        double after = target.getHealth() + target.getAbsorptionAmount();
+        boolean landed = after < before;
 
         double mult = cfg.getDouble("auto-fix.knockback-multiplier", 1.0);
-        if (kb > 0 && cfg.getBoolean("auto-fix.extra-knockback", true)) {
-            Vector dir = target.getLocation().toVector()
-                    .subtract(attacker.getLocation().toVector())
-                    .setY(0);
-            if (dir.lengthSquared() > 1.0E-6) {
-                dir.normalize().multiply(kb * 0.5 * mult);
-                Vector v = target.getVelocity().add(dir);
-                v.setY(Math.min(0.4, Math.max(v.getY(), 0.1)));
-                target.setVelocity(v);
-            }
+        if (landed && mult != 1.0) {
+            Vector v = target.getVelocity();
+            v.setX(v.getX() * mult);
+            v.setZ(v.getZ() * mult);
+            target.setVelocity(v);
         }
-    }
 
-    // ------------------------------------------------------------------
-    // Alerts (ops / permission holders)
-    // ------------------------------------------------------------------
-    private void alert(Player attacker, Player target, boolean fixed, double dist) {
-        if (!plugin.enabled("alerts")) return;
-
-        FileConfiguration cfg = plugin.getConfig();
-        long now = System.currentTimeMillis();
-        long cooldown = cfg.getLong("detector.alert-cooldown-ms", 0);
-        Long last = lastAlert.get(attacker.getUniqueId());
-        if (cooldown > 0 && last != null && now - last < cooldown) return;
-        lastAlert.put(attacker.getUniqueId(), now);
-
-        String format = cfg.getString("alert-format",
-                "{prefix} &7» &c{attacker} &7ghost hit &f{target} &8[{status}&8] &7ping &f{ping}ms &7reach &f{reach}");
-        String message = plugin.color(format
-                .replace("{prefix}", plugin.prefix())
-                .replace("{attacker}", attacker.getName())
-                .replace("{target}", target.getName())
-                .replace("{status}", fixed ? "&aAuto-fixed" : "&cNot fixed")
-                .replace("{ping}", String.valueOf(attacker.getPing()))
-                .replace("{reach}", String.format(Locale.ROOT, "%.2f", dist)));
-
-        for (Player online : Bukkit.getOnlinePlayers()) {
-            boolean allowed = online.isOp() || online.hasPermission("nerithmchitsync.alerts");
-            if (allowed && !mutedAlerts.contains(online.getUniqueId())) {
-                online.sendMessage(message);
-            }
-        }
-        Bukkit.getConsoleSender().sendMessage(message);
-    }
-
-    /** @return true if alerts are now ON for this player */
-    public boolean toggleAlerts(Player p) {
-        if (mutedAlerts.remove(p.getUniqueId())) return true;
-        mutedAlerts.add(p.getUniqueId());
-        return false;
-    }
-
-    // ------------------------------------------------------------------
-    // Combo helpers (used by WallGuard too)
-    // ------------------------------------------------------------------
-    public boolean hasActiveCombo(Player attacker) {
-        Combo c = combos.get(attacker.getUniqueId());
-        int window = plugin.getConfig().getInt("combo.window-ticks", 30);
-        return c != null && Bukkit.getCurrentTick() - c.last <= window;
-    }
-
-    /** True if this hit would be a follow-up hit of an already running combo. */
-    public boolean isComboHit(Player attacker, Player victim) {
-        Combo c = combos.get(attacker.getUniqueId());
-        if (c == null || !c.target.equals(victim.getUniqueId())) return false;
-        int window = plugin.getConfig().getInt("combo.window-ticks", 30);
-        return Bukkit.getCurrentTick() - c.last <= window && c.count >= 1;
-    }
-
-    private boolean isPvpMode(Player p) {
-        GameMode g = p.getGameMode();
-        return g == GameMode.SURVIVAL || g == GameMode.ADVENTURE;
-    }
-
-    @EventHandler
-    public void onQuit(PlayerQuitEvent e) {
-        UUID id = e.getPlayer().getUniqueId();
-        attempts.remove(id);
-        combos.remove(id);
-        fixTimes.remove(id);
-        lastAlert.remove(id);
-        lastSwing.remove(id);
-        history.remove(id);
-    }
-}
+        if (cfg.getBoolean("debug", false)) {
+            Bukkit.getConsoleSender().sendMessage(String.format(Locale.ROOT,
+                    "[HitSync debug] %s -> %s | hp %.2f ->
