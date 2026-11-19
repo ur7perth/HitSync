@@ -10,17 +10,19 @@ features:
   wall-protection: true
 
 detector:
-  reach: 3.1
-  aim-leniency: 0.10
+  # max distance (blocks) of the aim ray used to detect an attempted hit
+  reach: 3.6
+  aim-leniency: 0.15
   combo-leniency-bonus: 0.15
-  check-delay-ticks: 2
+  check-delay-ticks: 1
   treat-invulnerability-as-ghost: false
-  alert-cooldown-ms: 1000
+  # 0 = show every alert
+  alert-cooldown-ms: 0
 
 auto-fix:
-  max-reach: 3.4
-  max-fixes-per-second: 10
-
+  # hits farther than this are never fixed (protects against reach hacks)
+  max-reach: 4.0
+  max-fixes-per-second: 20
 combo:
   window-ticks: 30
 
