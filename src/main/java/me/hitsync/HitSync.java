@@ -8,14 +8,18 @@ import com.comphenix.protocol.events.PacketEvent;
 import com.comphenix.protocol.wrappers.EnumWrappers;
 
 import org.bukkit.Bukkit;
+import org.bukkit.World;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.util.Vector;
 
 import java.util.Map;
 import java.util.UUID;
@@ -25,16 +29,17 @@ public final class HitSync extends JavaPlugin implements Listener {
 
     private volatile boolean ghostHitEnabled = true;
 
-    private final Map<UUID, Long> attackPackets =
+    private final Map<AttackKey, AttackPacket> attackPackets =
             new ConcurrentHashMap<>();
 
-    private final Map<UUID, Long> damageEvents =
+    private final Map<AttackKey, DamageRecord> damageEvents =
             new ConcurrentHashMap<>();
 
-    private final Map<UUID, Boolean> cancelledEvents =
-            new ConcurrentHashMap<>();
+    private record AttackKey(UUID attackerId, int targetEntityId) {}
 
-    private long currentTick;
+    private record AttackPacket(long timestamp) {}
+
+    private record DamageRecord(long timestamp, boolean cancelled) {}
 
     @Override
     public void onEnable() {
@@ -48,10 +53,8 @@ public final class HitSync extends JavaPlugin implements Listener {
         Bukkit.getPluginManager().registerEvents(this, this);
 
         ProtocolLibrary.getProtocolManager().addPacketListener(
-                new PacketAdapter(
-                        this,
-                        PacketType.Play.Client.USE_ENTITY
-                ) {
+                new PacketAdapter(this, PacketType.Play.Client.USE_ENTITY) {
+
                     @Override
                     public void onPacketReceiving(PacketEvent event) {
 
@@ -72,22 +75,34 @@ public final class HitSync extends JavaPlugin implements Listener {
 
                             Player attacker = event.getPlayer();
 
-                            long packetTime = System.nanoTime();
+                            int targetEntityId =
+                                    event.getPacket().getIntegers().read(0);
 
-                            attackPackets.put(
+                            AttackKey key = new AttackKey(
                                     attacker.getUniqueId(),
-                                    packetTime
+                                    targetEntityId
                             );
 
-                            Bukkit.getScheduler().runTask(
+                            long timestamp = System.nanoTime();
+
+                            attackPackets.put(
+                                    key,
+                                    new AttackPacket(timestamp)
+                            );
+
+                            Bukkit.getScheduler().runTaskLater(
                                     HitSync.this,
-                                    () -> inspectAttack(attacker, packetTime)
+                                    () -> inspectAttack(
+                                            attacker,
+                                            key,
+                                            timestamp
+                                    ),
+                                    2L
                             );
 
                         } catch (Exception exception) {
                             getLogger().warning(
-                                    "Attack packet error: "
-                                            + exception.getMessage()
+                                    "Packet error: " + exception.getMessage()
                             );
                         }
                     }
@@ -96,25 +111,9 @@ public final class HitSync extends JavaPlugin implements Listener {
 
         Bukkit.getScheduler().runTaskTimer(
                 this,
-                () -> {
-                    currentTick++;
-
-                    long now = System.nanoTime();
-
-                    attackPackets.entrySet().removeIf(
-                            entry -> now - entry.getValue() > 2_000_000_000L
-                    );
-
-                    damageEvents.entrySet().removeIf(
-                            entry -> now - entry.getValue() > 2_000_000_000L
-                    );
-
-                    cancelledEvents.entrySet().removeIf(
-                            entry -> !damageEvents.containsKey(entry.getKey())
-                    );
-                },
-                1L,
-                1L
+                this::cleanOldRecords,
+                20L,
+                20L
         );
 
         getLogger().info("HitSync diagnostic system enabled.");
@@ -130,7 +129,6 @@ public final class HitSync extends JavaPlugin implements Listener {
 
         attackPackets.clear();
         damageEvents.clear();
-        cancelledEvents.clear();
 
         getLogger().info("HitSync disabled.");
     }
@@ -138,64 +136,166 @@ public final class HitSync extends JavaPlugin implements Listener {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onEntityDamage(EntityDamageByEntityEvent event) {
 
+        if (!ghostHitEnabled) {
+            return;
+        }
+
         if (!(event.getDamager() instanceof Player attacker)) {
             return;
         }
 
-        if (!(event.getEntity() instanceof Player)) {
+        if (!(event.getEntity() instanceof Player target)) {
             return;
         }
 
-        UUID attackerId = attacker.getUniqueId();
+        AttackKey key = new AttackKey(
+                attacker.getUniqueId(),
+                target.getEntityId()
+        );
 
-        damageEvents.put(attackerId, System.nanoTime());
-
-        cancelledEvents.put(
-                attackerId,
-                event.isCancelled()
+        damageEvents.put(
+                key,
+                new DamageRecord(
+                        System.nanoTime(),
+                        event.isCancelled()
+                )
         );
     }
 
-    private void inspectAttack(Player attacker, long packetTime) {
+    private void inspectAttack(
+            Player attacker,
+            AttackKey key,
+            long packetTimestamp
+    ) {
 
         if (!ghostHitEnabled || !attacker.isOnline()) {
             return;
         }
 
-        Long latestPacket = attackPackets.get(attacker.getUniqueId());
+        AttackPacket packet = attackPackets.get(key);
 
-        if (latestPacket == null || latestPacket != packetTime) {
+        if (packet == null || packet.timestamp() != packetTimestamp) {
             return;
         }
 
-        Long damageTime = damageEvents.get(attacker.getUniqueId());
+        DamageRecord damage = damageEvents.get(key);
 
-        if (damageTime == null || damageTime < packetTime) {
+        Player target = findTarget(
+                attacker.getWorld(),
+                key.targetEntityId()
+        );
 
-            getLogger().fine(
-                    "Attack packet received without a matching damage event. "
+        if (target == null) {
+
+            getLogger().info(
+                    "[HitSync] Target not found during inspection. "
                             + "Attacker: " + attacker.getName()
+                            + " | Entity ID: " + key.targetEntityId()
             );
 
             return;
         }
 
-        Boolean wasCancelled =
-                cancelledEvents.get(attacker.getUniqueId());
+        double distance = attacker.getLocation()
+                .distance(target.getLocation());
 
-        if (Boolean.TRUE.equals(wasCancelled)) {
+        Vector velocity = target.getVelocity();
 
-            getLogger().fine(
-                    "Attack damage event was cancelled. Attacker: "
-                            + attacker.getName()
+        boolean gliding = target.isGliding();
+
+        if (damage == null) {
+
+            getLogger().info(
+                    "[HitSync] No matching damage event."
+                            + " Attacker: " + attacker.getName()
+                            + " | Target: " + target.getName()
+                            + " | Elytra: " + gliding
+                            + " | Distance: " + String.format("%.2f", distance)
+                            + " | Target velocity: "
+                            + String.format(
+                                    "%.2f, %.2f, %.2f",
+                                    velocity.getX(),
+                                    velocity.getY(),
+                                    velocity.getZ()
+                            )
             );
 
             return;
         }
 
-        getLogger().fine(
-                "Attack and damage event detected for "
-                        + attacker.getName()
+        long difference = Math.abs(
+                damage.timestamp() - packetTimestamp
+        );
+
+        if (difference > 1_500_000_000L) {
+
+            getLogger().info(
+                    "[HitSync] Damage event timing mismatch."
+                            + " Attacker: " + attacker.getName()
+                            + " | Target: " + target.getName()
+            );
+
+            return;
+        }
+
+        if (damage.cancelled()) {
+
+            getLogger().info(
+                    "[HitSync] Damage event was cancelled."
+                            + " Attacker: " + attacker.getName()
+                            + " | Target: " + target.getName()
+                            + " | Elytra: " + gliding
+            );
+
+            return;
+        }
+
+        getLogger().info(
+                "[HitSync] Attack and damage event matched."
+                        + " Attacker: " + attacker.getName()
+                        + " | Target: " + target.getName()
+                        + " | Elytra: " + gliding
+                        + " | Distance: " + String.format("%.2f", distance)
+        );
+    }
+
+    private Player findTarget(World world, int entityId) {
+
+        for (Player player : world.getPlayers()) {
+
+            if (player.getEntityId() == entityId) {
+                return player;
+            }
+        }
+
+        return null;
+    }
+
+    private void cleanOldRecords() {
+
+        long now = System.nanoTime();
+        long expiration = 5_000_000_000L;
+
+        attackPackets.entrySet().removeIf(
+                entry -> now - entry.getValue().timestamp() > expiration
+        );
+
+        damageEvents.entrySet().removeIf(
+                entry -> now - entry.getValue().timestamp() > expiration
+        );
+    }
+
+    @EventHandler
+    public void onPlayerQuit(PlayerQuitEvent event) {
+
+        UUID playerId = event.getPlayer().getUniqueId();
+
+        attackPackets.keySet().removeIf(
+                key -> key.attackerId().equals(playerId)
+        );
+
+        damageEvents.keySet().removeIf(
+                key -> key.attackerId().equals(playerId)
         );
     }
 
