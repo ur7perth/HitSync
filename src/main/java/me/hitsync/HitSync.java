@@ -129,7 +129,7 @@ public final class HitSync extends JavaPlugin implements Listener {
                 20L
         );
 
-        getLogger().info("HitSync GhostHit Recovery enabled.");
+        getLogger().info("HitSync diagnostic system enabled.");
     }
 
     @Override
@@ -182,13 +182,21 @@ public final class HitSync extends JavaPlugin implements Listener {
             long packetTimestamp
     ) {
 
+        getLogger().info("[HitSync DEBUG] Inspecting attack...");
+
         if (!ghostHitEnabled || !attacker.isOnline()) {
+            getLogger().info(
+                    "[HitSync DEBUG] Plugin disabled or attacker offline."
+            );
             return;
         }
 
         AttackPacket packet = attackPackets.get(key);
 
         if (packet == null || packet.timestamp() != packetTimestamp) {
+            getLogger().info(
+                    "[HitSync DEBUG] Attack packet expired or replaced."
+            );
             return;
         }
 
@@ -197,13 +205,10 @@ public final class HitSync extends JavaPlugin implements Listener {
         DamageRecord damage = damageEvents.remove(key);
 
         if (damage != null) {
-            if (damage.cancelled()) {
-                getLogger().fine(
-                        "[HitSync] Original damage was cancelled. "
-                                + "Recovery skipped."
-                );
-            }
-
+            getLogger().info(
+                    "[HitSync DEBUG] Damage event found. Cancelled: "
+                            + damage.cancelled()
+            );
             return;
         }
 
@@ -213,52 +218,50 @@ public final class HitSync extends JavaPlugin implements Listener {
         );
 
         if (target == null) {
+            getLogger().info("[HitSync DEBUG] Target not found.");
             return;
         }
 
+        double distance = attacker.getLocation()
+                .distance(target.getLocation());
+
+        getLogger().info(
+                "[HitSync DEBUG] Target: " + target.getName()
+                        + " | Elytra: " + target.isGliding()
+                        + " | Distance: " + String.format("%.2f", distance)
+                        + " | NoDamageTicks: " + target.getNoDamageTicks()
+        );
+
         if (!target.isGliding()) {
+            getLogger().info(
+                    "[HitSync DEBUG] Target is not gliding."
+            );
             return;
         }
 
         if (!isValidRecoveryTarget(attacker, target)) {
+            getLogger().info(
+                    "[HitSync DEBUG] Target failed validation."
+            );
             return;
         }
 
-        long now = System.nanoTime();
-
-        Long lastRecovery = recoveryCooldowns.get(key);
-
-        if (lastRecovery != null
-                && now - lastRecovery < RECOVERY_COOLDOWN_NS) {
-            return;
-        }
-
-        // Paper 1.20.1: getAttackCooldown() takes no arguments.
-        double attackCooldown = attacker.getAttackCooldown();
-
-        if (attackCooldown < MIN_ATTACK_COOLDOWN) {
-            return;
-        }
-
-        double damageAmount = calculateRecoveryDamage(
-                attacker,
-                attackCooldown
-        );
-
-        if (damageAmount <= 0.0) {
-            return;
-        }
-
-        recoveryCooldowns.put(key, now);
+        double cooldown = attacker.getAttackCooldown();
 
         getLogger().info(
-                "[HitSync] Elytra GhostHit recovery attempted. "
-                        + "Attacker: " + attacker.getName()
-                        + " | Target: " + target.getName()
-                        + " | Damage: " + String.format("%.2f", damageAmount)
+                "[HitSync DEBUG] Attack cooldown: " + cooldown
         );
 
-        target.damage(damageAmount, attacker);
+        if (cooldown < MIN_ATTACK_COOLDOWN) {
+            getLogger().info(
+                    "[HitSync DEBUG] Attack cooldown too low."
+            );
+            return;
+        }
+
+        getLogger().info(
+                "[HitSync DEBUG] Recovery conditions passed."
+        );
     }
 
     private boolean isValidRecoveryTarget(
