@@ -1,0 +1,17 @@
+name: HitSync
+version: '${project.version}'
+main: com.hitsync.plugin.HitSync
+api-version: '1.20'
+description: Server-side hit verification. Fixes ghost hits and fake/missing criticals (Java + Bedrock).
+depend: [ProtocolLib]
+softdepend: [WorldGuard, floodgate, Geyser-Spigot]
+commands:
+  hitsync:
+    description: Toggle HitSync
+    usage: /<command> <on|off>
+    permission: hitsync.admin
+    aliases: [hs]
+permissions:
+  hitsync.admin:
+    description: Allows toggling HitSync
+    default: op
