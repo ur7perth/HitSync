@@ -1,19 +1,23 @@
-
-name: HitSync
-version: 3.0.0
-main: me.hitsync.HitSync
+name: NerithMcHitSync
+version: '${project.version}'
+main: com.nerith.hitsync.NerithMcHitSync
 api-version: '1.21'
-
-depend:
-  - ProtocolLib
+author: Nerith
+description: Ghost hit detector with automatic hit sync and wall combo protection.
 
 commands:
-  HitSync:
-    description: HitSync main command
-    usage: /HitSync
-    permission: hitsync.admin
+  hitsync:
+    description: NerithMcHitSync main command
+    usage: /<command> [status|toggle <feature>|alerts|reload]
+    aliases: [hs]
 
 permissions:
-  hitsync.admin:
-    description: Allows managing HitSync
+  nerithmchitsync.admin:
+    description: Use /hitsync toggle, reload and status
     default: op
+  nerithmchitsync.alerts:
+    description: Receive ghost hit alerts (ops always receive them)
+    default: op
+  nerithmchitsync.autofix:
+    description: Allow auto hit sync for this player
+    default: true
