@@ -196,8 +196,6 @@ public final class HitSync extends JavaPlugin implements Listener {
 
         DamageRecord damage = damageEvents.remove(key);
 
-        // The original attack produced a damage event.
-        // Never apply recovery damage in this case.
         if (damage != null) {
             if (damage.cancelled()) {
                 getLogger().fine(
@@ -218,7 +216,6 @@ public final class HitSync extends JavaPlugin implements Listener {
             return;
         }
 
-        // Recovery is only intended for Elytra targets.
         if (!target.isGliding()) {
             return;
         }
@@ -236,7 +233,8 @@ public final class HitSync extends JavaPlugin implements Listener {
             return;
         }
 
-        double attackCooldown = attacker.getAttackCooldown(0.5f);
+        // Paper 1.20.1: getAttackCooldown() takes no arguments.
+        double attackCooldown = attacker.getAttackCooldown();
 
         if (attackCooldown < MIN_ATTACK_COOLDOWN) {
             return;
@@ -251,7 +249,6 @@ public final class HitSync extends JavaPlugin implements Listener {
             return;
         }
 
-        // Mark the recovery before calling damage to prevent duplicates.
         recoveryCooldowns.put(key, now);
 
         getLogger().info(
@@ -261,8 +258,6 @@ public final class HitSync extends JavaPlugin implements Listener {
                         + " | Damage: " + String.format("%.2f", damageAmount)
         );
 
-        // This fires EntityDamageByEntityEvent.
-        // WorldGuard and other protection plugins can cancel it.
         target.damage(damageAmount, attacker);
     }
 
@@ -318,13 +313,11 @@ public final class HitSync extends JavaPlugin implements Listener {
 
         double baseDamage = attackAttribute.getValue();
 
-        // Minecraft's attack-strength damage scaling.
         double cooldownMultiplier =
                 attackCooldown * attackCooldown * 0.5 + 0.5;
 
         double damage = baseDamage * cooldownMultiplier;
 
-        // Sharpness bonus for the held weapon.
         int sharpnessLevel =
                 weapon.getEnchantmentLevel(Enchantment.DAMAGE_ALL);
 
