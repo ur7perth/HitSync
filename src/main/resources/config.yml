@@ -1,3 +1,17 @@
+prefix: "&eHitSync"
+
+alert-format: "{prefix} &7» &c{attacker} &7ghost hit &f{target} &8[{status}&8] &7ping &f{ping}ms &7reach &f{reach}"
+
+# true = prints a debug line to the console for every fixed hit
+debug: false
+
+# Every feature can be switched on/off with /hitsync toggle <feature>
+features:
+  detector: true
+  alerts: true
+  auto-fix: true
+  wall-protection: true
+
 detector:
   # max distance (blocks) of the aim ray, measured to the expanded hitbox
   reach: 3.5
@@ -25,9 +39,18 @@ auto-fix:
   iframe-tolerance-ticks: 2
   # clear i-frames before the fixed hit so full damage lands
   reset-iframes: true
-  # damage is scaled by the attack cooldown (for 1.9+ style combat)
-  use-cooldown: false
-  crits: true
-  # Knockback enchant, sprint hit and Fire Aspect
-  extra-knockback: true
+  # full attack cooldown for the fixed hit (recommended)
+  full-cooldown: true
+  # scales horizontal knockback after the hit (1.0 = vanilla/your knockback plugin)
   knockback-multiplier: 1.0
+
+combo:
+  window-ticks: 30
+
+wall-protection:
+  inside-blocks: true
+  pinned-against-wall: true
+  # false = protects every hit, true = only protects follow-up combo hits
+  require-combo: false
+  # how close to a wall counts as "pinned"
+  pin-distance: 0.5
