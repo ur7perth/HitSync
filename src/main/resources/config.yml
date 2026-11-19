@@ -1,35 +1,33 @@
-prefix: "&eHitSync"
-
-alert-format: "{prefix} &7» &c{attacker} &7ghost hit &f{target} &8[{status}&8] &7ping &f{ping}ms &7reach &f{reach}"
-
-# Every feature can be switched on/off with /hitsync toggle <feature>
-features:
-  detector: true
-  alerts: true
-  auto-fix: true
-  wall-protection: true
-
 detector:
-  # max distance (blocks) of the aim ray used to detect an attempted hit
-  reach: 3.6
-  aim-leniency: 0.15
-  combo-leniency-bonus: 0.15
+  # max distance (blocks) of the aim ray, measured to the expanded hitbox
+  reach: 3.5
+  # hitbox expansion (blocks) for aim tolerance
+  aim-leniency: 0.10
+  combo-leniency-bonus: 0.10
   check-delay-ticks: 1
+  # caps the ping used for rewinding (anti-abuse)
+  max-rewind-ms: 300
+  # extra ticks the client shows other players behind real time
+  client-interp-ticks: 1.0
+  # target is checked at (rewind - jitter, rewind, rewind + jitter)
+  rewind-jitter-ticks: 1.0
+  # 0.0 = 1.8 style (no cooldown), 0.8+ = ignores spam swings on 1.9+ combat
+  min-attack-strength: 0.0
   treat-invulnerability-as-ghost: false
   # 0 = show every alert
   alert-cooldown-ms: 0
 
 auto-fix:
   # hits farther than this are never fixed (protects against reach hacks)
-  max-reach: 4.0
+  max-reach: 3.8
   max-fixes-per-second: 20
-combo:
-  window-ticks: 30
-
-wall-protection:
-  inside-blocks: true
-  pinned-against-wall: true
-  # false = protects every hit, true = only protects follow-up combo hits
-  require-combo: false
-  # how close to a wall counts as "pinned"
-  pin-distance: 0.5
+  # i-frames shorter than this many ticks do not block a fix
+  iframe-tolerance-ticks: 2
+  # clear i-frames before the fixed hit so full damage lands
+  reset-iframes: true
+  # damage is scaled by the attack cooldown (for 1.9+ style combat)
+  use-cooldown: false
+  crits: true
+  # Knockback enchant, sprint hit and Fire Aspect
+  extra-knockback: true
+  knockback-multiplier: 1.0
