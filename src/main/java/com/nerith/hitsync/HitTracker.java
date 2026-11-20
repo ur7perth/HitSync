@@ -1,258 +1,461 @@
+
 package com.nerith.hitsync;
 
 import io.papermc.paper.event.player.PrePlayerAttackEntityEvent;
-
 import org.bukkit.Bukkit;
+import org.bukkit.FluidCollisionMode;
 import org.bukkit.GameMode;
-import org.bukkit.entity.Entity;
+import org.bukkit.Location;
+import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.EntityDamageEvent.DamageCause;
+import org.bukkit.event.player.PlayerAnimationEvent;
+import org.bukkit.event.player.PlayerAnimationType;
 import org.bukkit.event.player.PlayerQuitEvent;
-
+import org.bukkit.util.BoundingBox;
+import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
-import java.util.Iterator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 public final class HitTracker implements Listener {
 
-    private static final class Attempt {
+    private record Snap(int tick, BoundingBox box) {}
 
-        private final UUID attacker;
-        private final UUID target;
+    private record AttackKey(UUID attacker, UUID target) {}
 
-        private final int tick;
-        private final double distance;
+    private static final class Combo {
+        UUID target;
+        int count;
+        int last;
 
-        private final boolean attackerFlying;
-        private final boolean targetFlying;
-
-        private final Vector attackerVelocity;
-        private final Vector targetVelocity;
-
-        private boolean damageSeen;
-        private boolean damageCancelled;
-
-        private Attempt(
-                Player attacker,
-                Player target,
-                int tick
-        ) {
-            this.attacker = attacker.getUniqueId();
-            this.target = target.getUniqueId();
-
-            this.tick = tick;
-
-            this.distance = attacker.getLocation()
-                    .distance(target.getLocation());
-
-            this.attackerFlying =
-                    attacker.isGliding() || attacker.isFlying();
-
-            this.targetFlying =
-                    target.isGliding() || target.isFlying();
-
-            this.attackerVelocity =
-                    attacker.getVelocity().clone();
-
-            this.targetVelocity =
-                    target.getVelocity().clone();
+        Combo(UUID target, int count, int last) {
+            this.target = target;
+            this.count = count;
+            this.last = last;
         }
     }
+
+    private static final String DEFAULT_FORMAT =
+            "{prefix} &7- &c{attacker} &7ghost hit &f{target} "
+            + "&8[{status}&8] "
+            + "&7ping &f{ping}ms "
+            + "&7reach &f{reach}";
 
     private final NerithMcHitSync plugin;
 
-    /*
-     * Each attacker has their own pending attempts.
-     * Each attempt also stores the exact target UUID.
-     */
-    private final Map<UUID, Deque<Attempt>> pending =
-            new HashMap<>();
+    // كل محاولة مرتبطة بالمهاجم والهدف معاً
+    private final Map<AttackKey, Integer> attempts = new HashMap<>();
 
-    private final Map<UUID, Long> lastAlert =
-            new HashMap<>();
-
-    private final Map<UUID, Deque<Long>> fixTimes =
-            new HashMap<>();
-
-    private final Map<UUID, Boolean> mutedAlerts =
-            new HashMap<>();
-
-    /*
-     * stats:
-     * [0] = unregistered attack candidates
-     * [1] = successful retry attempts
-     * [2] = cancelled damage events
-     */
-    private final Map<UUID, int[]> stats =
-            new HashMap<>();
+    private final Map<UUID, Combo> combos = new HashMap<>();
+    private final Map<UUID, Long> lastAlert = new HashMap<>();
+    private final Map<UUID, Integer> lastSwing = new HashMap<>();
+    private final Map<UUID, Deque<Snap>> history = new HashMap<>();
+    private final Map<UUID, int[]> stats = new HashMap<>();
+    private final Set<UUID> mutedAlerts = new HashSet<>();
 
     public HitTracker(NerithMcHitSync plugin) {
         this.plugin = plugin;
-    }
 
-    // --------------------------------------------------
-    // Actual attack event
-    // --------------------------------------------------
-
-    @EventHandler(
-            priority = EventPriority.MONITOR,
-            ignoreCancelled = false
-    )
-    public void onPreAttack(PrePlayerAttackEntityEvent event) {
-
-        if (!plugin.enabled("detector")) {
-            return;
-        }
-
-        Player attacker = event.getPlayer();
-
-        Entity attacked = event.getAttacked();
-
-        if (!(attacked instanceof Player target)) {
-            return;
-        }
-
-        if (attacker.equals(target)) {
-            return;
-        }
-
-        if (!isPvpMode(attacker) || !isPvpMode(target)) {
-            return;
-        }
-
-        if (!attacker.getWorld().equals(target.getWorld())) {
-            return;
-        }
-
-        if (attacker.isDead() || target.isDead()) {
-            return;
-        }
-
-        if (!event.willAttack() || event.isCancelled()) {
-            return;
-        }
-
-        int tick = Bukkit.getCurrentTick();
-
-        Attempt attempt = new Attempt(
-                attacker,
-                target,
-                tick
-        );
-
-        Deque<Attempt> attempts = pending.computeIfAbsent(
-                attacker.getUniqueId(),
-                ignored -> new ArrayDeque<>()
-        );
-
-        attempts.addLast(attempt);
-
-        int maxPending = plugin.getConfig().getInt(
-                "detector.max-pending-attempts",
-                20
-        );
-
-        while (attempts.size() > maxPending) {
-            attempts.removeFirst();
-        }
-
-        long delay = Math.max(
-                1,
-                plugin.getConfig().getLong(
-                        "detector.check-delay-ticks",
-                        2
-                )
-        );
-
-        Bukkit.getScheduler().runTaskLater(
-                plugin,
-                () -> evaluate(attempt),
-                delay
+        Bukkit.getScheduler().runTaskTimer(
+                plugin, this::snapshot, 1L, 1L
         );
     }
 
-    // --------------------------------------------------
-    // Real damage event
-    // --------------------------------------------------
+    // ------------------------------------------------------------
+    // Position history
+    // ------------------------------------------------------------
 
-    @EventHandler(
-            priority = EventPriority.MONITOR,
-            ignoreCancelled = false
-    )
-    public void onDamage(EntityDamageByEntityEvent event) {
+    private void snapshot() {
+        int now = Bukkit.getCurrentTick();
 
-        if (!(event.getDamager() instanceof Player attacker)) {
-            return;
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            Deque<Snap> d = history.computeIfAbsent(
+                    p.getUniqueId(), k -> new ArrayDeque<>()
+            );
+
+            d.addLast(new Snap(now, p.getBoundingBox()));
+
+            while (d.size() > 24) {
+                d.pollFirst();
+            }
         }
 
-        if (!(event.getEntity() instanceof Player target)) {
-            return;
+        // حذف المحاولات القديمة لتجنب تراكم البيانات
+        attempts.entrySet().removeIf(
+                entry -> now - entry.getValue() > 40
+        );
+    }
+
+    private BoundingBox boxAt(UUID id, double t) {
+        Deque<Snap> d = history.get(id);
+
+        if (d == null || d.isEmpty()) {
+            return null;
         }
 
-        Deque<Attempt> attempts = pending.get(
-                attacker.getUniqueId()
+        Snap prev = null;
+        Snap next = null;
+
+        for (Snap s : d) {
+            if (s.tick() <= t) {
+                prev = s;
+            } else {
+                next = s;
+                break;
+            }
+        }
+
+        if (prev == null) {
+            return d.peekFirst().box();
+        }
+
+        if (next == null) {
+            return prev.box();
+        }
+
+        double span = next.tick() - prev.tick();
+        double f = (t - prev.tick()) / span;
+
+        BoundingBox a = prev.box();
+        BoundingBox b = next.box();
+
+        Vector min = new Vector(
+                lerp(a.getMinX(), b.getMinX(), f),
+                lerp(a.getMinY(), b.getMinY(), f),
+                lerp(a.getMinZ(), b.getMinZ(), f)
         );
 
-        if (attempts == null) {
+        Vector max = new Vector(
+                lerp(a.getMaxX(), b.getMaxX(), f),
+                lerp(a.getMaxY(), b.getMaxY(), f),
+                lerp(a.getMaxZ(), b.getMaxZ(), f)
+        );
+
+        return BoundingBox.of(min, max);
+    }
+
+    private static double lerp(double a, double b, double f) {
+        return a + (b - a) * f;
+    }
+
+    // ------------------------------------------------------------
+    // Records attacks received by the server
+    // ------------------------------------------------------------
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPreAttack(PrePlayerAttackEntityEvent e) {
+        if (!e.willAttack()) {
+            return;
+        }
+
+        if (!(e.getAttacked() instanceof Player target)) {
+            return;
+        }
+
+        UUID attackerId = e.getPlayer().getUniqueId();
+        UUID targetId = target.getUniqueId();
+
+        attempts.put(
+                new AttackKey(attackerId, targetId),
+                Bukkit.getCurrentTick()
+        );
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onDamage(EntityDamageByEntityEvent e) {
+        if (!(e.getDamager() instanceof Player attacker)) {
+            return;
+        }
+
+        if (e.getCause() != DamageCause.ENTITY_ATTACK) {
+            return;
+        }
+
+        if (!(e.getEntity() instanceof Player victim)) {
             return;
         }
 
         int now = Bukkit.getCurrentTick();
 
-        Iterator<Attempt> iterator = attempts.descendingIterator();
+        UUID attackerId = attacker.getUniqueId();
+        UUID victimId = victim.getUniqueId();
 
-        while (iterator.hasNext()) {
+        // نسجل الضربة لهذا الهدف فقط
+        attempts.put(
+                new AttackKey(attackerId, victimId),
+                now
+        );
 
-            Attempt attempt = iterator.next();
-
-            if (!attempt.target.equals(target.getUniqueId())) {
-                continue;
-            }
-
-            int age = now - attempt.tick;
-
-            if (age < 0 || age > 3) {
-                continue;
-            }
-
-            attempt.damageSeen = true;
-            attempt.damageCancelled = event.isCancelled();
-
-            if (event.isCancelled()) {
-                increment(attacker.getUniqueId(), 2);
-            }
-
+        if (e.isCancelled()) {
             return;
+        }
+
+        int window = plugin.getConfig().getInt(
+                "combo.window-ticks", 30
+        );
+
+        Combo c = combos.get(attackerId);
+
+        if (c != null
+                && c.target.equals(victimId)
+                && now - c.last <= window) {
+
+            c.count++;
+            c.last = now;
+
+        } else {
+            combos.put(
+                    attackerId,
+                    new Combo(victimId, 1, now)
+            );
         }
     }
 
-    // --------------------------------------------------
-    // Evaluate the attempt
-    // --------------------------------------------------
+    // ------------------------------------------------------------
+    // Detect left-click swings
+    // ------------------------------------------------------------
 
-    private void evaluate(Attempt attempt) {
-
-        removeAttempt(attempt);
-
-        if (attempt.damageSeen) {
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onSwing(PlayerAnimationEvent e) {
+        if (!plugin.enabled("detector")) {
             return;
         }
 
-        Player attacker = Bukkit.getPlayer(
-                attempt.attacker
+        if (e.getAnimationType() != PlayerAnimationType.ARM_SWING) {
+            return;
+        }
+
+        Player attacker = e.getPlayer();
+
+        if (attacker.isDead() || !isPvpMode(attacker)) {
+            return;
+        }
+
+        int now = Bukkit.getCurrentTick();
+        UUID attackerId = attacker.getUniqueId();
+
+        Integer previous = lastSwing.put(attackerId, now);
+
+        if (previous != null && previous == now) {
+            return;
+        }
+
+        FileConfiguration cfg = plugin.getConfig();
+
+        double minStrength = cfg.getDouble(
+                "detector.min-attack-strength", 0.0
         );
 
-        Player target = Bukkit.getPlayer(
-                attempt.target
+        if (attacker.getCooledAttackStrength(0f) < minStrength) {
+            return;
+        }
+
+        double reach = cfg.getDouble(
+                "detector.reach", 3.6
         );
+
+        double size = cfg.getDouble(
+                "detector.aim-leniency", 0.12
+        );
+
+        if (hasActiveCombo(attacker)) {
+            size += cfg.getDouble(
+                    "detector.combo-leniency-bonus", 0.08
+            );
+        }
+
+        Location eye = attacker.getEyeLocation();
+
+        Vector start = eye.toVector();
+        Vector dir = eye.getDirection();
+
+        double maxMs = cfg.getDouble(
+                "detector.max-rewind-ms", 350
+        );
+
+        double pingMs = Math.min(
+                Math.max(attacker.getPing(), 0),
+                maxMs
+        );
+
+        double interp = cfg.getDouble(
+                "detector.client-interp-ticks", 1.0
+        );
+
+        double rewind = pingMs / 50.0 + interp;
+
+        double jitter = cfg.getDouble(
+                "detector.rewind-jitter-ticks", 1.5
+        );
+
+        Player best = null;
+        double bestDist = Double.MAX_VALUE;
+
+        for (Player target : attacker.getWorld().getPlayers()) {
+            if (target.equals(attacker)) {
+                continue;
+            }
+
+            if (target.getGameMode() == GameMode.SPECTATOR) {
+                continue;
+            }
+
+            if (!attacker.canSee(target)) {
+                continue;
+            }
+
+            if (target.getLocation().distanceSquared(eye) > 144) {
+                continue;
+            }
+
+            double distance = rayDistance(
+                    start,
+                    dir,
+                    target,
+                    now - rewind,
+                    jitter,
+                    size,
+                    reach
+            );
+
+            if (distance >= 0 && distance < bestDist) {
+                bestDist = distance;
+                best = target;
+            }
+        }
+
+        if (best == null) {
+            return;
+        }
+
+        if (cfg.getBoolean("detector.block-check", true)
+                && bestDist > 0.1) {
+
+            Object block = attacker.getWorld().rayTraceBlocks(
+                    eye,
+                    dir,
+                    bestDist,
+                    FluidCollisionMode.NEVER,
+                    true
+            );
+
+            if (block != null) {
+                return;
+            }
+        }
+
+        final UUID targetId = best.getUniqueId();
+        final double distance = bestDist;
+
+        long delay = Math.max(
+                1,
+                cfg.getInt("detector.check-delay-ticks", 1)
+        );
+
+        Bukkit.getScheduler().runTaskLater(
+                plugin,
+                () -> verify(
+                        attackerId,
+                        targetId,
+                        now,
+                        distance
+                ),
+                delay
+        );
+    }
+
+    // ------------------------------------------------------------
+    // Ray tracing
+    // ------------------------------------------------------------
+
+    private double rayDistance(
+            Vector start,
+            Vector dir,
+            Player target,
+            double tick,
+            double jitter,
+            double size,
+            double reach
+    ) {
+        List<BoundingBox> boxes = new ArrayList<>();
+
+        boxes.add(target.getBoundingBox());
+
+        UUID id = target.getUniqueId();
+
+        double[] offsets = {
+                -jitter,
+                -jitter / 2.0,
+                0,
+                jitter / 2.0,
+                jitter
+        };
+
+        for (double offset : offsets) {
+            BoundingBox box = boxAt(id, tick + offset);
+
+            if (box != null) {
+                boxes.add(box);
+            }
+        }
+
+        double best = -1;
+
+        for (BoundingBox box : boxes) {
+            BoundingBox expanded = box.clone().expand(size);
+
+            double distance;
+
+            if (expanded.contains(start)) {
+                distance = 0;
+            } else {
+                RayTraceResult result = expanded.rayTrace(
+                        start,
+                        dir,
+                        reach
+                );
+
+                if (result == null) {
+                    continue;
+                }
+
+                distance = result.getHitPosition().distance(start);
+            }
+
+            if (best < 0 || distance < best) {
+                best = distance;
+            }
+        }
+
+        return best;
+    }
+
+    // ------------------------------------------------------------
+    // Verify suspected ghost hit
+    // ------------------------------------------------------------
+
+    private void verify(
+            UUID attackerId,
+            UUID targetId,
+            int swingTick,
+            double distance
+    ) {
+        Player attacker = Bukkit.getPlayer(attackerId);
+        Player target = Bukkit.getPlayer(targetId);
 
         if (attacker == null || target == null) {
             return;
@@ -262,19 +465,24 @@ public final class HitTracker implements Listener {
             return;
         }
 
-        if (attacker.isDead() || target.isDead()) {
+        FileConfiguration cfg = plugin.getConfig();
+
+        int window = cfg.getInt(
+                "detector.processed-window-ticks", 1
+        );
+
+        AttackKey key = new AttackKey(attackerId, targetId);
+
+        Integer attemptTick = attempts.get(key);
+
+        // لا نعتبر الضربة Ghost إذا وصل هجوم السيرفر لنفس الهدف
+        if (attemptTick != null
+                && attemptTick >= swingTick - window
+                && attemptTick <= swingTick + window + 2) {
             return;
         }
 
-        if (!isPvpMode(attacker) || !isPvpMode(target)) {
-            return;
-        }
-
-        if (!attacker.getWorld().equals(target.getWorld())) {
-            return;
-        }
-
-        if (attempt.damageCancelled) {
+        if (target.isDead() || !isPvpMode(target)) {
             return;
         }
 
@@ -282,298 +490,104 @@ public final class HitTracker implements Listener {
             return;
         }
 
-        /*
-         * Do not treat ordinary vanilla invulnerability frames
-         * as a ghost hit by default.
-         */
-        int tolerance = plugin.getConfig().getInt(
-                "detector.iframe-tolerance-ticks",
-                2
+        if (!attacker.getWorld().equals(target.getWorld())) {
+            return;
+        }
+
+        double tolerance = cfg.getInt(
+                "auto-fix.iframe-tolerance-ticks", 2
         );
 
-        double half =
-                target.getMaximumNoDamageTicks() / 2.0;
+        double half = target.getMaximumNoDamageTicks() / 2.0;
 
-        double remaining =
-                target.getNoDamageTicks() - half;
+        double remaining = target.getNoDamageTicks() - half;
 
-        boolean iframeBlocked = remaining > tolerance;
+        boolean blocked = remaining > tolerance;
 
-        if (iframeBlocked && !plugin.getConfig().getBoolean(
+        boolean treatInvulnerabilityAsGhost = cfg.getBoolean(
                 "detector.treat-invulnerability-as-ghost",
                 false
-        )) {
+        );
+
+        if (blocked && !treatInvulnerabilityAsGhost) {
             return;
         }
 
-        double distance = attempt.distance;
-
-        double maxDistance = plugin.getConfig().getDouble(
-                "auto-fix.max-reach",
-                3.9
-        );
-
-        /*
-         * Fast Elytra movement is recorded separately.
-         * The detector does not reject a valid attack just because
-         * one or both players are gliding.
-         */
-
-        boolean airborne =
-                attempt.attackerFlying || attempt.targetFlying;
-
-        increment(attacker.getUniqueId(), 0);
-
+        // لا نعيد تنفيذ الضربة برمجياً حتى لا نضاعف الضرر
+        // أو نغير Cooldown وCombo اللاعب.
         boolean fixed = false;
 
-        if (plugin.enabled("auto-fix")
-                && !iframeBlocked
-                && distance <= maxDistance) {
-
-            fixed = tryFix(
-                    attacker,
-                    target
-            );
-        }
-
-        if (fixed) {
-            increment(attacker.getUniqueId(), 1);
-        }
-
-        alert(
-                attacker,
-                target,
-                fixed,
-                distance,
-                airborne,
-                attempt
+        int[] stat = stats.computeIfAbsent(
+                attackerId,
+                k -> new int[2]
         );
 
-        if (plugin.getConfig().getBoolean("debug", false)) {
+        stat[0]++;
 
-            plugin.getLogger().info(
-                    "Attack candidate: "
-                            + attacker.getName()
-                            + " -> "
-                            + target.getName()
-                            + " | distance="
-                            + format(distance)
-                            + " | airborne="
-                            + airborne
-                            + " | attackerSpeed="
-                            + format(attempt.attackerVelocity.length())
-                            + " | targetSpeed="
-                            + format(attempt.targetVelocity.length())
-                            + " | fixed="
-                            + fixed
-            );
-        }
+        alert(attacker, target, fixed, distance);
     }
 
-    // --------------------------------------------------
-    // Remove pending attempt
-    // --------------------------------------------------
-
-    private void removeAttempt(Attempt attempt) {
-
-        Deque<Attempt> attempts = pending.get(
-                attempt.attacker
-        );
-
-        if (attempts == null) {
-            return;
-        }
-
-        attempts.remove(attempt);
-
-        if (attempts.isEmpty()) {
-            pending.remove(attempt.attacker);
-        }
-    }
-
-    // --------------------------------------------------
-    // Optional retry
-    // --------------------------------------------------
-
-    private boolean tryFix(
-            Player attacker,
-            Player target
-    ) {
-
-        if (!plugin.getConfig().getBoolean(
-                "auto-fix.enabled",
-                true
-        )) {
-            return false;
-        }
-
-        if (!attacker.hasPermission(
-                "nerithmchitsync.autofix"
-        )) {
-            return false;
-        }
-
-        if (!attacker.isOnline()
-                || !target.isOnline()
-                || attacker.isDead()
-                || target.isDead()) {
-            return false;
-        }
-
-        if (!isPvpMode(attacker) || !isPvpMode(target)) {
-            return false;
-        }
-
-        if (!attacker.getWorld().equals(target.getWorld())) {
-            return false;
-        }
-
-        double maxReach = plugin.getConfig().getDouble(
-                "auto-fix.max-reach",
-                3.9
-        );
-
-        double distance = attacker.getLocation()
-                .distance(target.getLocation());
-
-        if (distance > maxReach) {
-            return false;
-        }
-
-        /*
-         * Rate limit retries per attacker.
-         */
-        int maxFixes = plugin.getConfig().getInt(
-                "auto-fix.max-fixes-per-second",
-                10
-        );
-
-        Deque<Long> times = fixTimes.computeIfAbsent(
-                attacker.getUniqueId(),
-                ignored -> new ArrayDeque<>()
-        );
-
-        long now = System.currentTimeMillis();
-
-        while (!times.isEmpty()
-                && now - times.peekFirst() > 1000) {
-            times.removeFirst();
-        }
-
-        if (times.size() >= maxFixes) {
-            return false;
-        }
-
-        times.addLast(now);
-
-        /*
-         * Reset iframes only when explicitly enabled.
-         */
-        if (plugin.getConfig().getBoolean(
-                "auto-fix.reset-iframes",
-                false
-        )) {
-            target.setNoDamageTicks(0);
-        }
-
-        double before =
-                target.getHealth()
-                        + target.getAbsorptionAmount();
-
-        /*
-         * Use Bukkit's normal attack handling.
-         * This does not directly manufacture damage.
-         */
-        attacker.attack(target);
-
-        double after =
-                target.getHealth()
-                        + target.getAbsorptionAmount();
-
-        return after < before;
-    }
-
-    // --------------------------------------------------
+    // ------------------------------------------------------------
     // Alerts
-    // --------------------------------------------------
+    // ------------------------------------------------------------
+
+    private static String fmt(double value) {
+        return String.format(Locale.ROOT, "%.2f", value);
+    }
 
     private void alert(
             Player attacker,
             Player target,
             boolean fixed,
-            double distance,
-            boolean airborne,
-            Attempt attempt
+            double distance
     ) {
-
         if (!plugin.enabled("alerts")) {
             return;
         }
 
+        FileConfiguration cfg = plugin.getConfig();
+
         long now = System.currentTimeMillis();
 
-        long cooldown = plugin.getConfig().getLong(
-                "detector.alert-cooldown-ms",
-                500
+        long cooldown = cfg.getLong(
+                "detector.alert-cooldown-ms", 0
         );
 
-        Long previous = lastAlert.get(
-                attacker.getUniqueId()
-        );
+        Long last = lastAlert.get(attacker.getUniqueId());
 
         if (cooldown > 0
-                && previous != null
-                && now - previous < cooldown) {
+                && last != null
+                && now - last < cooldown) {
             return;
         }
 
         lastAlert.put(attacker.getUniqueId(), now);
 
-        String format = plugin.getConfig().getString(
+        String format = cfg.getString(
                 "alert-format",
-                "{prefix} &7- &c{attacker} &7ghost hit &f{target}"
+                DEFAULT_FORMAT
         );
-
-        String movement = airborne
-                ? "AIRBORNE"
-                : "GROUND";
 
         String status = fixed
-                ? "&aRETRIED"
-                : "&cNOT FIXED";
+                ? "&aAuto-fixed"
+                : "&cDetected";
 
-        String message = plugin.color(
-                format
-                        .replace("{prefix}", plugin.prefix())
-                        .replace("{attacker}", attacker.getName())
-                        .replace("{target}", target.getName())
-                        .replace("{status}", status)
-                        .replace("{ping}", String.valueOf(
-                                attacker.getPing()
-                        ))
-                        .replace("{reach}", format(distance))
-                        .replace("{movement}", movement)
-                        .replace("{attacker-speed}", format(
-                                attempt.attackerVelocity.length()
-                        ))
-                        .replace("{target-speed}", format(
-                                attempt.targetVelocity.length()
-                        ))
-        );
+        String message = format
+                .replace("{prefix}", plugin.prefix())
+                .replace("{attacker}", attacker.getName())
+                .replace("{target}", target.getName())
+                .replace("{status}", status)
+                .replace("{ping}", String.valueOf(attacker.getPing()))
+                .replace("{reach}", fmt(distance));
+
+        message = plugin.color(message);
 
         for (Player online : Bukkit.getOnlinePlayers()) {
-
             boolean allowed = online.isOp()
-                    || online.hasPermission(
-                            "nerithmchitsync.alerts"
-                    );
+                    || online.hasPermission("nerithmchitsync.alerts");
 
-            boolean muted = mutedAlerts.getOrDefault(
-                    online.getUniqueId(),
-                    false
-            );
-
-            if (allowed && !muted) {
+            if (allowed
+                    && !mutedAlerts.contains(online.getUniqueId())) {
                 online.sendMessage(message);
             }
         }
@@ -581,110 +595,65 @@ public final class HitTracker implements Listener {
         Bukkit.getConsoleSender().sendMessage(message);
     }
 
-    // --------------------------------------------------
-    // Alerts toggle
-    // --------------------------------------------------
+    // ------------------------------------------------------------
+    // Public methods
+    // ------------------------------------------------------------
 
     public boolean toggleAlerts(Player player) {
+        if (mutedAlerts.remove(player.getUniqueId())) {
+            return true;
+        }
 
-        UUID id = player.getUniqueId();
-
-        boolean muted = mutedAlerts.getOrDefault(
-                id,
-                false
-        );
-
-        mutedAlerts.put(id, !muted);
-
-        return muted;
-    }
-
-    // --------------------------------------------------
-    // Stats
-    // --------------------------------------------------
-
-    private void increment(UUID id, int index) {
-
-        int[] values = stats.computeIfAbsent(
-                id,
-                ignored -> new int[3]
-        );
-
-        values[index]++;
+        mutedAlerts.add(player.getUniqueId());
+        return false;
     }
 
     public int ghosts(UUID id) {
-        int[] values = stats.get(id);
-        return values == null ? 0 : values[0];
+        int[] stat = stats.get(id);
+        return stat == null ? 0 : stat[0];
     }
 
     public int fixes(UUID id) {
-        int[] values = stats.get(id);
-        return values == null ? 0 : values[1];
+        int[] stat = stats.get(id);
+        return stat == null ? 0 : stat[1];
     }
 
-    public int cancelled(UUID id) {
-        int[] values = stats.get(id);
-        return values == null ? 0 : values[2];
+    public boolean hasActiveCombo(Player attacker) {
+        Combo combo = combos.get(attacker.getUniqueId());
+
+        int window = plugin.getConfig().getInt(
+                "combo.window-ticks", 30
+        );
+
+        return combo != null
+                && Bukkit.getCurrentTick() - combo.last <= window;
     }
 
-    // --------------------------------------------------
+    // ------------------------------------------------------------
     // Helpers
-    // --------------------------------------------------
+    // ------------------------------------------------------------
 
     private boolean isPvpMode(Player player) {
-
         GameMode mode = player.getGameMode();
 
         return mode == GameMode.SURVIVAL
                 || mode == GameMode.ADVENTURE;
     }
 
-    private static String format(double value) {
-
-        return String.format(
-                java.util.Locale.ROOT,
-                "%.2f",
-                value
-        );
-    }
-
-    // --------------------------------------------------
-    // Player quit
-    // --------------------------------------------------
-
     @EventHandler
-    public void onQuit(PlayerQuitEvent event) {
+    public void onQuit(PlayerQuitEvent e) {
+        UUID id = e.getPlayer().getUniqueId();
 
-        UUID id = event.getPlayer().getUniqueId();
-
-        pending.remove(id);
-        lastAlert.remove(id);
-        fixTimes.remove(id);
-        mutedAlerts.remove(id);
-        stats.remove(id);
-
-        for (Deque<Attempt> attempts : pending.values()) {
-            attempts.removeIf(
-                    attempt -> attempt.target.equals(id)
-            );
-        }
-
-        pending.entrySet().removeIf(
-                entry -> entry.getValue().isEmpty()
+        attempts.keySet().removeIf(
+                key -> key.attacker().equals(id)
+                        || key.target().equals(id)
         );
-    }
 
-    // --------------------------------------------------
-    // Shutdown
-    // --------------------------------------------------
-
-    public void shutdown() {
-
-        pending.clear();
-        lastAlert.clear();
-        fixTimes.clear();
-        mutedAlerts.clear();
-        stats.clear();
+        combos.remove(id);
+        lastAlert.remove(id);
+        lastSwing.remove(id);
+        history.remove(id);
+        stats.remove(id);
+        mutedAlerts.remove(id);
     }
 }
