@@ -1,3 +1,4 @@
+
 package com.nerith.hitsync;
 
 import org.bukkit.ChatColor;
@@ -5,26 +6,30 @@ import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
 
 public final class NerithMcHitSync extends JavaPlugin {
+
     private HitTracker tracker;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
+        getConfig().options().copyDefaults(true);
+        saveConfig();
 
         tracker = new HitTracker(this);
-        getServer().getPluginManager().registerEvents(tracker, this);
 
-        PluginCommand command = getCommand("hitsync");
+        getServer().getPluginManager()
+                .registerEvents(tracker, this);
 
-        if (command != null) {
-            HitSyncCommand executor = new HitSyncCommand(this);
-            command.setExecutor(executor);
-            command.setTabCompleter(executor);
-        } else {
-            getLogger().severe("Command 'hitsync' is missing from plugin.yml");
+        HitSyncCommand command = new HitSyncCommand(this);
+
+        PluginCommand pc = getCommand("hitsync");
+
+        if (pc != null) {
+            pc.setExecutor(command);
+            pc.setTabCompleter(command);
         }
 
-        getLogger().info("NerithMcHitSync 2.0.0 enabled.");
+        getLogger().info("NerithMcHitSync enabled.");
     }
 
     @Override
@@ -41,17 +46,18 @@ public final class NerithMcHitSync extends JavaPlugin {
     }
 
     public boolean enabled(String feature) {
-        return getConfig().getBoolean("features." + feature, true);
+        return getConfig().getBoolean(
+                "features." + feature, true
+        );
     }
 
     public String prefix() {
-        return getConfig().getString("prefix", "&eNerithHitSync");
+        return getConfig().getString(
+                "prefix", "&eHitSync"
+        );
     }
 
     public String color(String text) {
-        return ChatColor.translateAlternateColorCodes(
-                '&',
-                text == null ? "" : text
-        );
+        return ChatColor.translateAlternateColorCodes('&', text);
     }
 }
