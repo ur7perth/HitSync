@@ -1,53 +1,22 @@
-prefix: "&eHitSync"
+prefix: "&eNerithHitSync"
 
-alert-format: "{prefix} &7- &c{attacker} &7ghost hit &f{target} &8[{status}&8] &7ping &f{ping}ms &7reach &f{reach}"
-
-# prints a line to the console for every fixed hit
+# This plugin diagnoses missing server-side damage processing.
+# It does NOT generate a second/synthetic hit.
 debug: false
 
 features:
   detector: true
   alerts: true
-  auto-fix: true
 
 detector:
-  # max aim distance (blocks) measured to the expanded hitbox
+  # Ping rewind is capped to avoid excessive historical compensation.
+  max-rewind-ms: 300
+
   reach: 3.6
-  # hitbox expansion for aim tolerance
-  aim-leniency: 0.12
-  combo-leniency-bonus: 0.08
-  check-delay-ticks: 1
-  # attacks processed within this many ticks of the swing = not a ghost
-  processed-window-ticks: 1
-  # caps the ping used for rewinding (anti-abuse)
-  max-rewind-ms: 350
-  # ticks the client shows other players behind real time
-  client-interp-ticks: 1.0
-  # the target is checked around the rewound time +- this many ticks
-  rewind-jitter-ticks: 1.5
-  # ignore swings when a block is between attacker and target
-  block-check: true
-  # 0.0 = 1.8 style, 0.8+ = ignore spam swings on 1.9+ combat
-  min-attack-strength: 0.0
-  treat-invulnerability-as-ghost: false
-  # 0 = show every alert
-  alert-cooldown-ms: 0
 
-auto-fix:
-  # hits farther than this are never fixed
-  max-reach: 3.9
-  max-fixes-per-second: 20
-  iframe-tolerance-ticks: 2
-  # clear i-frames so the fixed hit lands with full damage
-  reset-iframes: true
-  # full attack cooldown for the fixed hit
-  full-cooldown: true
-  # scales the knockback after the hit (1.0 = unchanged)
-  knockback-multiplier: 1.0
-  # guarantees a minimum knockback so the combo never breaks
-  # (set 0 to disable, vanilla is about 0.4)
-  min-horizontal-kb: 0.32
-  min-vertical-kb: 0.30
+  aim-leniency: 0.10
 
-combo:
-  window-ticks: 30
+  # 0 = every alert; 1500 = one alert per attacker every 1.5 seconds.
+  alert-cooldown-ms: 1500
+
+alert-format: "{prefix} &7- &c{attacker} &7unregistered hit on &f{target} &8[ping {ping}ms, {movement}]"
