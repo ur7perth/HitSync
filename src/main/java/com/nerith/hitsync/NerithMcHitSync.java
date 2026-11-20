@@ -5,30 +5,34 @@ import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
 
 public final class NerithMcHitSync extends JavaPlugin {
-
     private HitTracker tracker;
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
-        getConfig().options().copyDefaults(true);
-        saveConfig();
 
         tracker = new HitTracker(this);
-        getServer().getPluginManager()
-                .registerEvents(tracker, this);
+        getServer().getPluginManager().registerEvents(tracker, this);
 
-        HitSyncCommand command = new HitSyncCommand(this);
-        PluginCommand pc = getCommand("hitsync");
-        if (pc != null) {
-            pc.setExecutor(command);
-            pc.setTabCompleter(command);
+        PluginCommand command = getCommand("hitsync");
+
+        if (command != null) {
+            HitSyncCommand executor = new HitSyncCommand(this);
+            command.setExecutor(executor);
+            command.setTabCompleter(executor);
+        } else {
+            getLogger().severe("Command 'hitsync' is missing from plugin.yml");
         }
-        getLogger().info("NerithMcHitSync enabled.");
+
+        getLogger().info("NerithMcHitSync 2.0.0 enabled.");
     }
 
     @Override
     public void onDisable() {
+        if (tracker != null) {
+            tracker.shutdown();
+        }
+
         getLogger().info("NerithMcHitSync disabled.");
     }
 
@@ -41,10 +45,13 @@ public final class NerithMcHitSync extends JavaPlugin {
     }
 
     public String prefix() {
-        return getConfig().getString("prefix", "&eHitSync");
+        return getConfig().getString("prefix", "&eNerithHitSync");
     }
 
     public String color(String text) {
-        return ChatColor.translateAlternateColorCodes('&', text);
+        return ChatColor.translateAlternateColorCodes(
+                '&',
+                text == null ? "" : text
+        );
     }
 }
