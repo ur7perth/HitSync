@@ -3,7 +3,6 @@ package com.nerith.hitsync;
 
 import io.papermc.paper.event.player.PrePlayerAttackEntityEvent;
 import org.bukkit.Bukkit;
-import org.bukkit.FluidCollisionMode;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.configuration.file.FileConfiguration;
@@ -51,15 +50,12 @@ public final class HitTracker implements Listener {
 
     private static final String DEFAULT_FORMAT =
             "{prefix} &7- &c{attacker} &7ghost hit &f{target} "
-            + "&8[{status}&8] "
-            + "&7ping &f{ping}ms "
+            + "&8[{status}&8] &7ping &f{ping}ms "
             + "&7reach &f{reach}";
 
     private final NerithMcHitSync plugin;
 
-    // كل محاولة مرتبطة بالمهاجم والهدف معاً
     private final Map<AttackKey, Integer> attempts = new HashMap<>();
-
     private final Map<UUID, Combo> combos = new HashMap<>();
     private final Map<UUID, Long> lastAlert = new HashMap<>();
     private final Map<UUID, Integer> lastSwing = new HashMap<>();
@@ -75,9 +71,9 @@ public final class HitTracker implements Listener {
         );
     }
 
-    // ------------------------------------------------------------
+    // --------------------------------------------------
     // Position history
-    // ------------------------------------------------------------
+    // --------------------------------------------------
 
     private void snapshot() {
         int now = Bukkit.getCurrentTick();
@@ -94,13 +90,12 @@ public final class HitTracker implements Listener {
             }
         }
 
-        // حذف المحاولات القديمة لتجنب تراكم البيانات
         attempts.entrySet().removeIf(
                 entry -> now - entry.getValue() > 40
         );
     }
 
-    private BoundingBox boxAt(UUID id, double t) {
+    private BoundingBox boxAt(UUID id, double tick) {
         Deque<Snap> d = history.get(id);
 
         if (d == null || d.isEmpty()) {
@@ -111,7 +106,7 @@ public final class HitTracker implements Listener {
         Snap next = null;
 
         for (Snap s : d) {
-            if (s.tick() <= t) {
+            if (s.tick() <= tick) {
                 prev = s;
             } else {
                 next = s;
@@ -128,7 +123,7 @@ public final class HitTracker implements Listener {
         }
 
         double span = next.tick() - prev.tick();
-        double f = (t - prev.tick()) / span;
+        double f = (tick - prev.tick()) / span;
 
         BoundingBox a = prev.box();
         BoundingBox b = next.box();
@@ -152,9 +147,9 @@ public final class HitTracker implements Listener {
         return a + (b - a) * f;
     }
 
-    // ------------------------------------------------------------
-    // Records attacks received by the server
-    // ------------------------------------------------------------
+    // --------------------------------------------------
+    // Attack tracking
+    // --------------------------------------------------
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onPreAttack(PrePlayerAttackEntityEvent e) {
@@ -166,11 +161,11 @@ public final class HitTracker implements Listener {
             return;
         }
 
-        UUID attackerId = e.getPlayer().getUniqueId();
-        UUID targetId = target.getUniqueId();
-
         attempts.put(
-                new AttackKey(attackerId, targetId),
+                new AttackKey(
+                        e.getPlayer().getUniqueId(),
+                        target.getUniqueId()
+                ),
                 Bukkit.getCurrentTick()
         );
     }
@@ -194,7 +189,6 @@ public final class HitTracker implements Listener {
         UUID attackerId = attacker.getUniqueId();
         UUID victimId = victim.getUniqueId();
 
-        // نسجل الضربة لهذا الهدف فقط
         attempts.put(
                 new AttackKey(attackerId, victimId),
                 now
@@ -225,9 +219,9 @@ public final class HitTracker implements Listener {
         }
     }
 
-    // ------------------------------------------------------------
-    // Detect left-click swings
-    // ------------------------------------------------------------
+    // --------------------------------------------------
+    // Left click detection
+    // --------------------------------------------------
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onSwing(PlayerAnimationEvent e) {
@@ -342,24 +336,24 @@ public final class HitTracker implements Listener {
             return;
         }
 
-        if (cfg.getBoolean("detector.block-check", true)
-                && bestDist > 0.1) {
+        if (cfg.getBoolean("detector.block-check", true)) {
+            if (bestDist > 0.1) {
+                RayTraceResult block = attacker.getWorld().rayTraceBlocks(
+                        eye,
+                        dir,
+                        bestDist,
+                        org.bukkit.FluidCollisionMode.NEVER,
+                        true
+                );
 
-            Object block = attacker.getWorld().rayTraceBlocks(
-                    eye,
-                    dir,
-                    bestDist,
-                    FluidCollisionMode.NEVER,
-                    true
-            );
-
-            if (block != null) {
-                return;
+                if (block != null) {
+                    return;
+                }
             }
         }
 
-        final UUID targetId = best.getUniqueId();
-        final double distance = bestDist;
+        UUID targetId = best.getUniqueId();
+        double distance = bestDist;
 
         long delay = Math.max(
                 1,
@@ -368,19 +362,14 @@ public final class HitTracker implements Listener {
 
         Bukkit.getScheduler().runTaskLater(
                 plugin,
-                () -> verify(
-                        attackerId,
-                        targetId,
-                        now,
-                        distance
-                ),
+                () -> verify(attackerId, targetId, now, distance),
                 delay
         );
     }
 
-    // ------------------------------------------------------------
+    // --------------------------------------------------
     // Ray tracing
-    // ------------------------------------------------------------
+    // --------------------------------------------------
 
     private double rayDistance(
             Vector start,
@@ -444,9 +433,9 @@ public final class HitTracker implements Listener {
         return best;
     }
 
-    // ------------------------------------------------------------
-    // Verify suspected ghost hit
-    // ------------------------------------------------------------
+    // --------------------------------------------------
+    // Verification
+    // --------------------------------------------------
 
     private void verify(
             UUID attackerId,
@@ -472,10 +461,8 @@ public final class HitTracker implements Listener {
         );
 
         AttackKey key = new AttackKey(attackerId, targetId);
-
         Integer attemptTick = attempts.get(key);
 
-        // لا نعتبر الضربة Ghost إذا وصل هجوم السيرفر لنفس الهدف
         if (attemptTick != null
                 && attemptTick >= swingTick - window
                 && attemptTick <= swingTick + window + 2) {
@@ -499,7 +486,6 @@ public final class HitTracker implements Listener {
         );
 
         double half = target.getMaximumNoDamageTicks() / 2.0;
-
         double remaining = target.getNoDamageTicks() - half;
 
         boolean blocked = remaining > tolerance;
@@ -513,8 +499,7 @@ public final class HitTracker implements Listener {
             return;
         }
 
-        // لا نعيد تنفيذ الضربة برمجياً حتى لا نضاعف الضرر
-        // أو نغير Cooldown وCombo اللاعب.
+        // لا نكرر الهجوم برمجياً حتى لا نخرب الـCombo.
         boolean fixed = false;
 
         int[] stat = stats.computeIfAbsent(
@@ -527,9 +512,9 @@ public final class HitTracker implements Listener {
         alert(attacker, target, fixed, distance);
     }
 
-    // ------------------------------------------------------------
+    // --------------------------------------------------
     // Alerts
-    // ------------------------------------------------------------
+    // --------------------------------------------------
 
     private static String fmt(double value) {
         return String.format(Locale.ROOT, "%.2f", value);
@@ -595,9 +580,9 @@ public final class HitTracker implements Listener {
         Bukkit.getConsoleSender().sendMessage(message);
     }
 
-    // ------------------------------------------------------------
+    // --------------------------------------------------
     // Public methods
-    // ------------------------------------------------------------
+    // --------------------------------------------------
 
     public boolean toggleAlerts(Player player) {
         if (mutedAlerts.remove(player.getUniqueId())) {
@@ -606,6 +591,10 @@ public final class HitTracker implements Listener {
 
         mutedAlerts.add(player.getUniqueId());
         return false;
+    }
+
+    public boolean cancelled(UUID id) {
+        return mutedAlerts.contains(id);
     }
 
     public int ghosts(UUID id) {
@@ -629,9 +618,9 @@ public final class HitTracker implements Listener {
                 && Bukkit.getCurrentTick() - combo.last <= window;
     }
 
-    // ------------------------------------------------------------
+    // --------------------------------------------------
     // Helpers
-    // ------------------------------------------------------------
+    // --------------------------------------------------
 
     private boolean isPvpMode(Player player) {
         GameMode mode = player.getGameMode();
@@ -655,5 +644,15 @@ public final class HitTracker implements Listener {
         history.remove(id);
         stats.remove(id);
         mutedAlerts.remove(id);
+    }
+
+    public void shutdown() {
+        attempts.clear();
+        combos.clear();
+        lastAlert.clear();
+        lastSwing.clear();
+        history.clear();
+        stats.clear();
+        mutedAlerts.clear();
     }
 }
