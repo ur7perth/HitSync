@@ -10,7 +10,8 @@ import org.bukkit.entity.Player;
 import java.util.ArrayList;
 import java.util.List;
 
-public final class HitSyncCommand implements CommandExecutor, TabCompleter {
+public final class HitSyncCommand
+        implements CommandExecutor, TabCompleter {
 
     private static final List<String> SUBS = List.of(
             "status",
@@ -27,18 +28,25 @@ public final class HitSyncCommand implements CommandExecutor, TabCompleter {
     }
 
     private void msg(CommandSender sender, String text) {
+
         sender.sendMessage(
-                plugin.color(plugin.prefix() + " &7- &f" + text)
+                plugin.color(
+                        plugin.prefix() + " &7- &f" + text
+                )
         );
     }
 
     private boolean admin(CommandSender sender) {
+
         if (sender.isOp()
-                || sender.hasPermission("nerithmchitsync.admin")) {
+                || sender.hasPermission(
+                        "nerithmchitsync.admin"
+                )) {
             return true;
         }
 
         msg(sender, "&cYou do not have permission.");
+
         return false;
     }
 
@@ -49,53 +57,77 @@ public final class HitSyncCommand implements CommandExecutor, TabCompleter {
             String label,
             String[] args
     ) {
+
         if (args.length == 0) {
-            msg(sender, "/hs status | stats [player] | alerts | debug | reload");
+
+            msg(sender, "/hs status");
+            msg(sender, "/hs alerts");
+            msg(sender, "/hs stats [player]");
+            msg(sender, "/hs debug");
+            msg(sender, "/hs reload");
+
             return true;
         }
 
         switch (args[0].toLowerCase()) {
 
             case "status" -> {
+
                 if (!admin(sender)) return true;
 
                 msg(sender, "Detector: "
-                        + (plugin.enabled("detector") ? "&aON" : "&cOFF"));
+                        + (plugin.enabled("detector")
+                        ? "&aON" : "&cOFF"));
 
                 msg(sender, "Alerts: "
-                        + (plugin.enabled("alerts") ? "&aON" : "&cOFF"));
+                        + (plugin.enabled("alerts")
+                        ? "&aON" : "&cOFF"));
+
+                msg(sender, "Auto-Fix: "
+                        + (plugin.enabled("auto-fix")
+                        ? "&aON" : "&cOFF"));
 
                 msg(sender, "Debug: "
                         + (plugin.getConfig().getBoolean("debug")
                         ? "&aON" : "&cOFF"));
-
-                msg(sender, "&7Mode: exact-target tracking; no synthetic damage.");
             }
 
-            case "reload" -> {
-                if (!admin(sender)) return true;
+            case "alerts" -> {
 
-                plugin.reloadConfig();
-                msg(sender, "&aConfig reloaded.");
-            }
+                if (!(sender instanceof Player player)) {
+                    msg(sender, "&cPlayers only.");
+                    return true;
+                }
 
-            case "debug" -> {
-                if (!admin(sender)) return true;
+                if (!player.isOp()
+                        && !player.hasPermission(
+                                "nerithmchitsync.alerts"
+                        )) {
 
-                boolean value = !plugin.getConfig().getBoolean("debug", false);
+                    msg(sender, "&cYou do not have permission.");
+                    return true;
+                }
 
-                plugin.getConfig().set("debug", value);
-                plugin.saveConfig();
+                boolean on = plugin.tracker()
+                        .toggleAlerts(player);
 
-                msg(sender, "Debug: " + (value ? "&aON" : "&cOFF"));
+                msg(sender, "Alerts: "
+                        + (on ? "&aON" : "&cOFF"));
             }
 
             case "stats" -> {
+
                 if (!admin(sender)) return true;
 
-                Player target = args.length >= 2
-                        ? Bukkit.getPlayerExact(args[1])
-                        : sender instanceof Player self ? self : null;
+                Player target;
+
+                if (args.length >= 2) {
+                    target = Bukkit.getPlayerExact(args[1]);
+                } else {
+                    target = sender instanceof Player player
+                            ? player
+                            : null;
+                }
 
                 if (target == null) {
                     msg(sender, "&cPlayer not found.");
@@ -104,32 +136,45 @@ public final class HitSyncCommand implements CommandExecutor, TabCompleter {
 
                 HitTracker tracker = plugin.tracker();
 
-                msg(sender,
-                        target.getName()
-                                + " | unregistered candidates: &c"
-                                + tracker.ghosts(target.getUniqueId())
-                                + " &7| vanilla iframe blocks: &e"
-                                + tracker.blocked(target.getUniqueId()));
+                msg(sender, "Player: &e" + target.getName());
+
+                msg(sender, "Ghost candidates: &c"
+                        + tracker.ghosts(target.getUniqueId()));
+
+                msg(sender, "Successful retries: &a"
+                        + tracker.fixes(target.getUniqueId()));
+
+                msg(sender, "Cancelled damage events: &e"
+                        + tracker.cancelled(target.getUniqueId()));
+
+                msg(sender, "Ping: &f"
+                        + target.getPing() + "ms");
             }
 
-            case "alerts" -> {
-                if (!(sender instanceof Player player)) {
-                    msg(sender, "&cPlayers only.");
-                    return true;
-                }
+            case "debug" -> {
 
-                if (!player.isOp()
-                        && !player.hasPermission("nerithmchitsync.alerts")) {
-                    msg(sender, "&cYou do not have permission.");
-                    return true;
-                }
+                if (!admin(sender)) return true;
 
-                boolean on = plugin.tracker().toggleAlerts(player);
+                boolean next = !plugin.getConfig()
+                        .getBoolean("debug", false);
 
-                msg(sender, "Alerts: " + (on ? "&aON" : "&cOFF"));
+                plugin.getConfig().set("debug", next);
+                plugin.saveConfig();
+
+                msg(sender, "Debug: "
+                        + (next ? "&aON" : "&cOFF"));
             }
 
-            default -> msg(sender, "&cUnknown subcommand. Use /hs");
+            case "reload" -> {
+
+                if (!admin(sender)) return true;
+
+                plugin.reloadConfig();
+
+                msg(sender, "&aConfiguration reloaded.");
+            }
+
+            default -> msg(sender, "&cUnknown command. Use /hs");
         }
 
         return true;
@@ -142,20 +187,26 @@ public final class HitSyncCommand implements CommandExecutor, TabCompleter {
             String alias,
             String[] args
     ) {
+
         List<String> output = new ArrayList<>();
 
         if (args.length == 1) {
+
             for (String sub : SUBS) {
+
                 if (sub.startsWith(args[0].toLowerCase())) {
                     output.add(sub);
                 }
             }
+
         } else if (args.length == 2
                 && args[0].equalsIgnoreCase("stats")) {
 
             for (Player player : Bukkit.getOnlinePlayers()) {
+
                 if (player.getName().toLowerCase()
                         .startsWith(args[1].toLowerCase())) {
+
                     output.add(player.getName());
                 }
             }
@@ -163,4 +214,4 @@ public final class HitSyncCommand implements CommandExecutor, TabCompleter {
 
         return output;
     }
-}
+        }
