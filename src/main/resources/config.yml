@@ -1,22 +1,39 @@
-prefix: "&eNerithHitSync"
+prefix: "&6NerithHitSync"
 
-# This plugin diagnoses missing server-side damage processing.
-# It does NOT generate a second/synthetic hit.
 debug: false
 
 features:
   detector: true
   alerts: true
+  auto-fix: true
+
+alert-format: "{prefix} &8| &c{attacker} &7-> &f{target} &8| {status} &8| &7Ping: &f{ping}ms &8| &7Movement: &e{movement} &8| &7Distance: &f{reach}"
 
 detector:
-  # Ping rewind is capped to avoid excessive historical compensation.
-  max-rewind-ms: 300
+  # Delay before checking an attack attempt.
+  check-delay-ticks: 2
 
-  reach: 3.6
+  # Maximum number of pending attempts per attacker.
+  max-pending-attempts: 20
 
-  aim-leniency: 0.10
+  # Maximum tolerated invulnerability ticks.
+  iframe-tolerance-ticks: 2
 
-  # 0 = every alert; 1500 = one alert per attacker every 1.5 seconds.
-  alert-cooldown-ms: 1500
+  # Treat iframe-blocked attacks as ghost candidates.
+  treat-invulnerability-as-ghost: false
 
-alert-format: "{prefix} &7- &c{attacker} &7unregistered hit on &f{target} &8[ping {ping}ms, {movement}]"
+  # Alert cooldown per attacker.
+  alert-cooldown-ms: 500
+
+auto-fix:
+  enabled: true
+
+  # Maximum distance for retry attempts.
+  max-reach: 3.9
+
+  # Maximum retry attempts per second per player.
+  max-fixes-per-second: 10
+
+  # Reset target invulnerability frames before retry.
+  # Enable only if this behavior is intended on your server.
+  reset-iframes: false
