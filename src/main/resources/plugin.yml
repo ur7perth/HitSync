@@ -1,23 +1,21 @@
 name: NerithMcHitSync
-version: '${project.version}'
+version: '2.0.0'
 main: com.nerith.hitsync.NerithMcHitSync
 api-version: '1.21'
 author: Nerith
-description: Ghost hit detector with automatic hit sync.
+description: Exact-target hit tracking and airborne combat diagnostics.
 
 commands:
   hitsync:
     description: NerithMcHitSync main command
-    usage: /<command> [status|toggle|alerts|stats|debug|reload]
+    usage: /<command> [status|alerts|stats|debug|reload]
     aliases: [hs]
 
 permissions:
   nerithmchitsync.admin:
-    description: Use toggle, stats, debug, reload and status
+    description: Use administrative HitSync commands
     default: op
+
   nerithmchitsync.alerts:
-    description: Receive ghost hit alerts
+    description: Receive hit diagnostics
     default: op
-  nerithmchitsync.autofix:
-    description: Allow auto hit sync for this player
-    default: true
