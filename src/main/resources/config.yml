@@ -3,29 +3,47 @@ prefix: "&6NerithHitSync"
 debug: false
 
 features:
-  detector: true
-  alerts: true
-  auto-fix: false
+detector: true
+alerts: true
+auto-fix: true
 
 alert-format: "{prefix} &8| &c{attacker} &7-> &f{target} &8| {status} &8| &7Ping: &f{ping}ms &8| &7Movement: &e{movement} &8| &7Distance: &f{reach}"
 
 detector:
-  check-delay-ticks: 2
-  max-pending-attempts: 20
-  iframe-tolerance-ticks: 2
-  treat-invulnerability-as-ghost: false
-  alert-cooldown-ms: 500
-  processed-window-ticks: 2
 
-  min-attack-strength: 0.0
-  reach: 3.6
-  aim-leniency: 0.12
-  combo-leniency-bonus: 0.08
+Delay before checking an attack attempt.
 
-  max-rewind-ms: 350
-  client-interp-ticks: 1.0
-  rewind-jitter-ticks: 1.5
-  block-check: true
+check-delay-ticks: 2
 
-combo:
-  window-ticks: 30
+Maximum number of pending attempts per attacker.
+
+max-pending-attempts: 20
+
+Maximum tolerated invulnerability ticks.
+
+iframe-tolerance-ticks: 2
+
+Treat iframe-blocked attacks as ghost candidates.
+
+treat-invulnerability-as-ghost: false
+
+Alert cooldown per attacker.
+
+alert-cooldown-ms: 500
+
+auto-fix:
+enabled: true
+
+Maximum distance for retry attempts.
+
+max-reach: 3.9
+
+Maximum retry attempts per second per player.
+
+max-fixes-per-second: 10
+
+Reset target invulnerability frames before retry.
+
+Enable only if this behavior is intended on your server.
+
+reset-iframes: false
