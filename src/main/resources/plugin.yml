@@ -1,21 +1,15 @@
-name: NerithMcHitSync
-version: '2.0.0'
-main: com.nerith.hitsync.NerithMcHitSync
+
+name: NerithHitProcessor
+version: '1.0.1'
+main: com.nerith.hitprocessor.NerithHitProcessor
 api-version: '1.21'
 author: Nerith
-description: Exact-target hit tracking and airborne combat diagnostics.
+description: GhostHit processing companion for NerithMcHitSync
 
-commands:
-  hitsync:
-    description: NerithMcHitSync main command
-    usage: /<command> [status|alerts|stats|debug|reload]
-    aliases: [hs]
+depend:
+  - NerithMcHitSync
 
 permissions:
-  nerithmchitsync.admin:
-    description: Use administrative HitSync commands
-    default: op
-
-  nerithmchitsync.alerts:
-    description: Receive hit diagnostics
+  nerithhitprocessor.alerts:
+    description: Receive NerithHitProcessor alerts
     default: op
